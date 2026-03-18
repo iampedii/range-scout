@@ -70,7 +70,7 @@ type ui struct {
 	scanFormat          string
 	scanPath            string
 	scanSaveScope       scanSaveScope
-	scanRanges          map[string]string
+	scanRanges          map[string][]string
 	prefixSuggestedPath string
 	scanSuggestedPath   string
 	scanWorkers         string
@@ -103,7 +103,7 @@ func newUI() *ui {
 		prefixFormat:  export.FormatCSV.String(),
 		scanFormat:    export.FormatTXT.String(),
 		scanSaveScope: scanSaveRecursiveOnly,
-		scanRanges:    make(map[string]string),
+		scanRanges:    make(map[string][]string),
 		scanWorkers:   "256",
 		scanTimeoutMS: "1200",
 		scanHostLimit: "50000",
@@ -215,6 +215,10 @@ func (u *ui) populateOperators() {
 }
 
 func (u *ui) handleKeys(event *tcell.EventKey) *tcell.EventKey {
+	if u.pages.HasPage("range-picker") {
+		return event
+	}
+
 	if u.focusIsEditable() {
 		if event.Key() == tcell.KeyEsc {
 			u.app.SetFocus(u.operatorList)
@@ -365,7 +369,7 @@ func (u *ui) rebuildForm() {
 	case screenScanner:
 		u.form.SetTitle("Commands - DNS Scan")
 		u.ensureScanRangeSelection(u.selectedOperator().Key)
-		u.form.AddFormItem(u.newReadOnlyInput("Range", u.selectedScanRange(u.selectedOperator().Key)))
+		u.form.AddFormItem(u.newReadOnlyInput("Ranges", u.selectedScanSummary(u.selectedOperator().Key)))
 		u.form.AddFormItem(u.newInput("Workers", u.scanWorkers, func(value string) { u.scanWorkers = value }))
 		u.form.AddFormItem(u.newInput("Timeout", u.scanTimeoutMS, func(value string) { u.scanTimeoutMS = value }))
 		u.form.AddFormItem(u.newInput("Host Limit", u.scanHostLimit, func(value string) { u.scanHostLimit = value }))
@@ -556,22 +560,60 @@ func (u *ui) openRangePicker() {
 	}
 
 	u.ensureScanRangeSelection(operator.Key)
-	current := u.selectedScanRange(operator.Key)
+	selected := make(map[string]bool, len(u.scanRanges[operator.Key]))
+	for _, prefix := range u.scanRanges[operator.Key] {
+		selected[prefix] = true
+	}
+
+	search := tview.NewInputField().
+		SetLabel("Filter: ").
+		SetText("").
+		SetPlaceholder("CIDR, slash, or IP fragment")
+	search.SetPlaceholderTextColor(tcell.ColorGray)
 	list := tview.NewList()
 	list.ShowSecondaryText(false)
 	list.SetBorder(true)
-	list.SetTitle("Pick Scan Range")
+	list.SetTitle("Pick Scan Ranges")
 	list.SetWrapAround(false)
 
+	visibleIndices := make([]int, 0, len(lookup.Entries))
 	currentIndex := 0
-	for index, entry := range lookup.Entries {
-		prefix := entry.Prefix
-		if prefix == current {
-			currentIndex = index
+	refreshList := func(query string, keepPrefix string) {
+		list.Clear()
+		visibleIndices = visibleIndices[:0]
+		currentIndex = 0
+		for _, index := range filterPrefixEntryIndexes(lookup.Entries, query) {
+			entry := lookup.Entries[index]
+			list.AddItem(scanRangeLabel(entry, selected[entry.Prefix]), "", 0, nil)
+			if entry.Prefix == keepPrefix {
+				currentIndex = len(visibleIndices)
+			}
+			visibleIndices = append(visibleIndices, index)
 		}
-		list.AddItem(fmt.Sprintf("%12s IPs  %s", formatCount(entry.TotalAddresses), prefix), "", 0, nil)
+		if len(visibleIndices) == 0 {
+			list.AddItem("No matching ranges", "", 0, nil)
+			currentIndex = 0
+		}
+		list.SetCurrentItem(currentIndex)
 	}
-	list.SetCurrentItem(currentIndex)
+
+	toggleSelected := func(listIndex int) {
+		if listIndex < 0 || listIndex >= len(visibleIndices) {
+			return
+		}
+		entry := lookup.Entries[visibleIndices[listIndex]]
+		if selected[entry.Prefix] {
+			if len(selected) == 1 {
+				u.setStatus("At least one range must stay selected.")
+				return
+			}
+			delete(selected, entry.Prefix)
+		} else {
+			selected[entry.Prefix] = true
+		}
+		refreshList(search.GetText(), entry.Prefix)
+	}
+	refreshList("", u.selectedScanPrefixes(operator.Key)[0])
 
 	closePicker := func() {
 		u.pages.RemovePage("range-picker")
@@ -579,14 +621,7 @@ func (u *ui) openRangePicker() {
 	}
 
 	list.SetSelectedFunc(func(index int, mainText, secondaryText string, shortcut rune) {
-		if index < 0 || index >= len(lookup.Entries) {
-			return
-		}
-		u.scanRanges[operator.Key] = lookup.Entries[index].Prefix
-		u.addActivity(fmt.Sprintf("Selected scan range %s for %s", lookup.Entries[index].Prefix, operator.Name))
-		closePicker()
-		u.rebuildForm()
-		u.renderAll()
+		toggleSelected(index)
 	})
 	list.SetDoneFunc(func() {
 		closePicker()
@@ -594,22 +629,81 @@ func (u *ui) openRangePicker() {
 	})
 	list.SetInputCapture(func(event *tcell.EventKey) *tcell.EventKey {
 		switch event.Key() {
+		case tcell.KeyRune:
+			if event.Rune() == ' ' {
+				toggleSelected(list.GetCurrentItem())
+				return nil
+			}
+			if event.Rune() == 'q' {
+				closePicker()
+				u.renderAll()
+				return nil
+			}
 		case tcell.KeyEscape:
 			closePicker()
 			u.renderAll()
 			return nil
+		case tcell.KeyTab:
+			u.app.SetFocus(search)
+			return nil
 		}
-		if event.Rune() == 'q' {
-			closePicker()
-			u.renderAll()
+		if event.Rune() == '/' {
+			u.app.SetFocus(search)
 			return nil
 		}
 		return event
 	})
 
-	frame := tview.NewFrame(list).
+	search.SetChangedFunc(func(text string) {
+		currentPrefix := ""
+		if item := list.GetCurrentItem(); item >= 0 && item < len(visibleIndices) {
+			currentPrefix = lookup.Entries[visibleIndices[item]].Prefix
+		}
+		refreshList(text, currentPrefix)
+	})
+	search.SetDoneFunc(func(key tcell.Key) {
+		switch key {
+		case tcell.KeyEscape:
+			closePicker()
+			u.renderAll()
+		default:
+			u.app.SetFocus(list)
+		}
+	})
+
+	applySelection := func() {
+		chosen := make([]string, 0, len(lookup.Entries))
+		for _, entry := range lookup.Entries {
+			if selected[entry.Prefix] {
+				chosen = append(chosen, entry.Prefix)
+			}
+		}
+		if len(chosen) == 0 {
+			chosen = append(chosen, lookup.Entries[0].Prefix)
+		}
+		u.scanRanges[operator.Key] = chosen
+		u.addActivity(fmt.Sprintf("Selected %d ranges for %s", len(chosen), operator.Name))
+		closePicker()
+		u.rebuildForm()
+		u.renderAll()
+	}
+
+	actions := tview.NewForm().
+		AddButton("Done", applySelection).
+		AddButton("Cancel", func() {
+			closePicker()
+			u.renderAll()
+		})
+	actions.SetButtonsAlign(tview.AlignLeft)
+
+	content := tview.NewFlex().SetDirection(tview.FlexRow).
+		AddItem(search, 3, 0, true).
+		AddItem(list, 0, 1, false).
+		AddItem(actions, 3, 0, false)
+
+	frame := tview.NewFrame(content).
 		SetBorders(1, 1, 1, 1, 1, 1)
-	frame.AddText("Mouse wheel scrolls. Enter selects. Esc cancels.", false, tview.AlignCenter, tcell.ColorYellow)
+	frame.AddText("Filter examples: 94.182, /24, 109.230. Enter or Space toggles. Done applies.", false, tview.AlignCenter, tcell.ColorYellow)
 
 	modal := tview.NewFlex().
 		AddItem(nil, 0, 1, false).
@@ -620,7 +714,7 @@ func (u *ui) openRangePicker() {
 		AddItem(nil, 0, 1, false)
 
 	u.pages.AddPage("range-picker", modal, true, true)
-	u.app.SetFocus(list)
+	u.app.SetFocus(search)
 }
 
 func (u *ui) renderDetails() {
@@ -665,7 +759,13 @@ func (u *ui) renderDetails() {
 		u.details.SetTitle("DNS Scan Details")
 		progress, resolvers := u.currentScanState(operator.Key)
 		stableCount := countStableResolvers(resolvers)
-		fmt.Fprintf(&builder, "Selected range: %s\n", u.selectedScanRange(operator.Key))
+		fmt.Fprintf(&builder, "Selected ranges: %s\n", u.selectedScanSummary(operator.Key))
+		if entries, err := u.selectedScanEntries(operator.Key); err == nil && len(entries) > 0 {
+			fmt.Fprintf(&builder, "Selected IPs: %s\n", formatCount(totalPrefixAddresses(entries)))
+			for _, entry := range entries {
+				fmt.Fprintf(&builder, "  - %s (%s IPs)\n", entry.Prefix, formatCount(entry.TotalAddresses))
+			}
+		}
 		fmt.Fprintf(&builder, "Probe URLs: %s | %s\n", displayProbeURL(u.scanProbeURL1), displayProbeURL(u.scanProbeURL2))
 		builder.WriteString("Note: choose sites that are reachable in your network.\n")
 		fmt.Fprintf(&builder, "Targets: %s  Scanned: %s  Reachable: %s  Recursive: %s  Stable: %s  Progress: %s %s\n\n",
@@ -842,7 +942,7 @@ func (u *ui) startScan() {
 	u.addActivity(fmt.Sprintf(
 		"Scan started for %s on %s with %d workers over %s targets",
 		operator.Name,
-		u.selectedScanRange(operator.Key),
+		u.selectedScanSummary(operator.Key),
 		cfg.Workers,
 		formatCount(u.liveProgress.Total),
 	))
@@ -1064,21 +1164,40 @@ func (u *ui) ensureScanRangeSelection(operatorKey string) {
 		return
 	}
 
-	selected := u.scanRanges[operatorKey]
+	available := make(map[string]struct{}, len(lookup.Entries))
+	filtered := make([]string, 0, len(lookup.Entries))
 	for _, entry := range lookup.Entries {
-		if entry.Prefix == selected {
-			return
+		available[entry.Prefix] = struct{}{}
+	}
+	for _, prefix := range u.scanRanges[operatorKey] {
+		if _, ok := available[prefix]; ok {
+			filtered = append(filtered, prefix)
 		}
 	}
-	u.scanRanges[operatorKey] = lookup.Entries[0].Prefix
+	if len(filtered) == 0 {
+		filtered = append(filtered, lookup.Entries[0].Prefix)
+	}
+	u.scanRanges[operatorKey] = filtered
 }
 
-func (u *ui) selectedScanRange(operatorKey string) string {
+func (u *ui) selectedScanPrefixes(operatorKey string) []string {
 	u.ensureScanRangeSelection(operatorKey)
-	if selected, ok := u.scanRanges[operatorKey]; ok && selected != "" {
-		return selected
+	if selected, ok := u.scanRanges[operatorKey]; ok {
+		return slices.Clone(selected)
 	}
-	return "-"
+	return nil
+}
+
+func (u *ui) selectedScanSummary(operatorKey string) string {
+	selected := u.selectedScanPrefixes(operatorKey)
+	switch len(selected) {
+	case 0:
+		return "-"
+	case 1:
+		return selected[0]
+	default:
+		return fmt.Sprintf("%d ranges selected", len(selected))
+	}
 }
 
 func (u *ui) selectedScanEntries(operatorKey string) ([]model.PrefixEntry, error) {
@@ -1087,13 +1206,20 @@ func (u *ui) selectedScanEntries(operatorKey string) ([]model.PrefixEntry, error
 		return nil, fmt.Errorf("fetch prefixes first before starting a scan")
 	}
 	u.ensureScanRangeSelection(operatorKey)
-	selected := u.scanRanges[operatorKey]
+	selected := make(map[string]struct{}, len(u.scanRanges[operatorKey]))
+	for _, prefix := range u.scanRanges[operatorKey] {
+		selected[prefix] = struct{}{}
+	}
+	entries := make([]model.PrefixEntry, 0, len(selected))
 	for _, entry := range lookup.Entries {
-		if entry.Prefix == selected {
-			return []model.PrefixEntry{entry}, nil
+		if _, ok := selected[entry.Prefix]; ok {
+			entries = append(entries, entry)
 		}
 	}
-	return nil, fmt.Errorf("selected scan range is no longer available")
+	if len(entries) == 0 {
+		return nil, fmt.Errorf("selected scan ranges are no longer available")
+	}
+	return entries, nil
 }
 
 func (u *ui) scanRunning() bool {
@@ -1184,6 +1310,34 @@ func countStableResolvers(resolvers []model.Resolver) uint64 {
 		}
 	}
 	return count
+}
+
+func totalPrefixAddresses(entries []model.PrefixEntry) uint64 {
+	var total uint64
+	for _, entry := range entries {
+		total += entry.TotalAddresses
+	}
+	return total
+}
+
+func filterPrefixEntryIndexes(entries []model.PrefixEntry, query string) []int {
+	query = strings.ToLower(strings.TrimSpace(query))
+	indexes := make([]int, 0, len(entries))
+	for index, entry := range entries {
+		if query != "" && !strings.Contains(strings.ToLower(entry.Prefix), query) {
+			continue
+		}
+		indexes = append(indexes, index)
+	}
+	return indexes
+}
+
+func scanRangeLabel(entry model.PrefixEntry, selected bool) string {
+	label := fmt.Sprintf("%12s IPs  %s", formatCount(entry.TotalAddresses), entry.Prefix)
+	if selected {
+		return fmt.Sprintf("[black:lightskyblue]%s[-:-:-]", label)
+	}
+	return label
 }
 
 func displayProbeURL(value string) string {

@@ -106,7 +106,7 @@ func TestDefaultOutputPathIncludesTimestamp(t *testing.T) {
 	}
 }
 
-func TestSelectedScanEntriesUsesSingleChosenRange(t *testing.T) {
+func TestSelectedScanEntriesUsesMultipleChosenRanges(t *testing.T) {
 	u := newUI()
 	operator := u.selectedOperator()
 	u.lookupCache[operator.Key] = model.LookupResult{
@@ -118,20 +118,24 @@ func TestSelectedScanEntriesUsesSingleChosenRange(t *testing.T) {
 	}
 
 	u.ensureScanRangeSelection(operator.Key)
-	if got := u.selectedScanRange(operator.Key); got != "198.51.100.0/24" {
-		t.Fatalf("unexpected default scan range: %s", got)
+	selected := u.selectedScanPrefixes(operator.Key)
+	if len(selected) != 1 || selected[0] != "198.51.100.0/24" {
+		t.Fatalf("unexpected default scan selection: %#v", selected)
 	}
 
-	u.scanRanges[operator.Key] = "198.51.101.0/24"
+	u.scanRanges[operator.Key] = []string{"198.51.100.0/24", "198.51.101.0/24"}
 	entries, err := u.selectedScanEntries(operator.Key)
 	if err != nil {
 		t.Fatalf("selectedScanEntries returned error: %v", err)
 	}
-	if len(entries) != 1 {
-		t.Fatalf("expected exactly one selected entry, got %d", len(entries))
+	if len(entries) != 2 {
+		t.Fatalf("expected exactly two selected entries, got %d", len(entries))
 	}
-	if entries[0].Prefix != "198.51.101.0/24" {
-		t.Fatalf("unexpected selected prefix: %s", entries[0].Prefix)
+	if entries[0].Prefix != "198.51.100.0/24" || entries[1].Prefix != "198.51.101.0/24" {
+		t.Fatalf("unexpected selected prefixes: %#v", entries)
+	}
+	if got := u.selectedScanSummary(operator.Key); got != "2 ranges selected" {
+		t.Fatalf("unexpected scan summary: %s", got)
 	}
 }
 
@@ -179,5 +183,37 @@ func TestScannerFormHidesPrefixActionsAndShowsBack(t *testing.T) {
 	}
 	if !u.hasButton("Start Scan") {
 		t.Fatal("expected scanner form to show Start Scan button")
+	}
+}
+
+func TestFilterPrefixEntryIndexes(t *testing.T) {
+	entries := []model.PrefixEntry{
+		{Prefix: "198.51.100.0/24"},
+		{Prefix: "198.51.101.0/24"},
+		{Prefix: "203.0.113.0/24"},
+	}
+
+	indexes := filterPrefixEntryIndexes(entries, "198.51.10")
+	if len(indexes) != 2 {
+		t.Fatalf("expected 2 matching indexes, got %d", len(indexes))
+	}
+	if indexes[0] != 0 || indexes[1] != 1 {
+		t.Fatalf("unexpected indexes: %#v", indexes)
+	}
+
+	indexes = filterPrefixEntryIndexes(entries, "/24")
+	if len(indexes) != 3 {
+		t.Fatalf("expected 3 slash-filter matches, got %d", len(indexes))
+	}
+}
+
+func TestScanRangeLabelShowsHighlight(t *testing.T) {
+	entry := model.PrefixEntry{Prefix: "198.51.100.0/24", TotalAddresses: 256}
+
+	if got := scanRangeLabel(entry, false); got != "         256 IPs  198.51.100.0/24" {
+		t.Fatalf("unexpected plain label: %q", got)
+	}
+	if got := scanRangeLabel(entry, true); got != "[black:lightskyblue]         256 IPs  198.51.100.0/24[-:-:-]" {
+		t.Fatalf("unexpected highlighted label: %q", got)
 	}
 }
