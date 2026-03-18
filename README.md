@@ -3,15 +3,19 @@
 `range-scout` is a small TUI for:
 
 - fetching announced IPv4 prefixes for supported Iranian operators from RIPEstat
-- choosing a single range to scan
+- choosing one or more ranges to scan
 - checking which hosts on that range answer on DNS and allow recursion
 - exporting prefixes or scan results on demand as `txt`, `csv`, or `json`
+
+## Screenshot
+
+![range-scout screenshot](./screenshot.png)
 
 ## What It Does
 
 1. Fetches IPv4 prefixes for a selected operator from RIPEstat.
-2. Lets you choose one CIDR range from that operator.
-3. Scans hosts in that range over UDP/53.
+2. Lets you choose one or more CIDR ranges from that operator.
+3. Scans hosts in those ranges over UDP/53.
 4. Marks hosts as:
    - `dns reachable`
    - `recursive`
@@ -42,7 +46,7 @@ go run .
 1. Select an operator from the left sidebar.
 2. Click `Fetch` to load its prefixes.
 3. Click `Scan Setup`.
-4. Click `Pick Range` and choose one CIDR.
+4. Click `Pick Range`, use the filter box if needed, and choose one or more CIDRs.
 5. Set the probe URLs.
    Choose sites that are reachable in your network.
 6. Click `Start Scan`.
