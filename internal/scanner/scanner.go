@@ -88,33 +88,35 @@ func Scan(
 	stabilityDomains := configuredStabilityDomains(cfg.StabilityDomains)
 
 	progressDone := make(chan struct{})
+	var progressWG sync.WaitGroup
+	progressWG.Add(1)
 	go func() {
+		defer progressWG.Done()
 		ticker := time.NewTicker(250 * time.Millisecond)
 		defer ticker.Stop()
+		tickerCh := ticker.C
+		ctxDone := ctx.Done()
+		emitProgress := func() {
+			if emit != nil {
+				emit(Event{
+					Type:      EventProgress,
+					Scanned:   scanned.Load(),
+					Total:     totalTargets,
+					Reachable: reachable.Load(),
+					Recursive: recursive.Load(),
+				})
+			}
+		}
 		for {
 			select {
 			case <-progressDone:
-				if emit != nil {
-					emit(Event{
-						Type:      EventProgress,
-						Scanned:   scanned.Load(),
-						Total:     totalTargets,
-						Reachable: reachable.Load(),
-						Recursive: recursive.Load(),
-					})
-				}
+				emitProgress()
 				return
-			case <-ticker.C:
-				if emit != nil {
-					emit(Event{
-						Type:      EventProgress,
-						Scanned:   scanned.Load(),
-						Total:     totalTargets,
-						Reachable: reachable.Load(),
-						Recursive: recursive.Load(),
-					})
-				}
-			case <-ctx.Done():
+			case <-tickerCh:
+				emitProgress()
+			case <-ctxDone:
+				tickerCh = nil
+				ctxDone = nil
 			}
 		}
 	}()
@@ -170,6 +172,7 @@ func Scan(
 
 	workerWG.Wait()
 	close(progressDone)
+	progressWG.Wait()
 
 	walkErr := <-walkErrCh
 	resolversMu.Lock()
@@ -257,7 +260,7 @@ func probeLookup(ctx context.Context, addr netip.Addr, timeout time.Duration, po
 }
 
 func probeStability(ctx context.Context, addr netip.Addr, timeout time.Duration, port int, stabilityDomains []string) bool {
-	for _, domain := range configuredStabilityDomains(stabilityDomains) {
+	for _, domain := range stabilityDomains {
 		if ctx.Err() != nil {
 			return false
 		}

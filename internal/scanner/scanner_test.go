@@ -27,7 +27,7 @@ func TestProbeResolverReachableWithoutRecursion(t *testing.T) {
 	resolver, ok := probeResolver(context.Background(), scanTarget{
 		IP:     netip.MustParseAddr("127.0.0.1"),
 		Prefix: "127.0.0.1/32",
-	}, 500*time.Millisecond, port, nil)
+	}, 500*time.Millisecond, port, configuredStabilityDomains(nil))
 	if !ok {
 		t.Fatal("expected dns host to be reachable")
 	}
@@ -76,7 +76,7 @@ func TestProbeResolverMarksStableRecursiveResolvers(t *testing.T) {
 	resolver, ok := probeResolver(context.Background(), scanTarget{
 		IP:     netip.MustParseAddr("127.0.0.1"),
 		Prefix: "127.0.0.1/32",
-	}, 500*time.Millisecond, port, nil)
+	}, 500*time.Millisecond, port, configuredStabilityDomains(nil))
 	if !ok {
 		t.Fatal("expected dns host to be reachable")
 	}
@@ -138,6 +138,49 @@ func TestProbeResolverMarksUnstableRecursiveResolvers(t *testing.T) {
 	}
 }
 
+func TestProbeResolverUsesProvidedStabilityDomainsWithoutFallback(t *testing.T) {
+	port, shutdown := startTestDNSServer(t, func(w dns.ResponseWriter, r *dns.Msg) {
+		reply := new(dns.Msg)
+		reply.SetReply(r)
+		if r.RecursionDesired {
+			reply.RecursionAvailable = true
+			if r.Question[0].Name == "google.com." {
+				reply.Answer = []dns.RR{
+					&dns.A{
+						Hdr: dns.RR_Header{
+							Name:   "google.com.",
+							Rrtype: dns.TypeA,
+							Class:  dns.ClassINET,
+							Ttl:    300,
+						},
+						A: net.ParseIP("8.8.8.8").To4(),
+					},
+				}
+			} else {
+				reply.Rcode = dns.RcodeNameError
+			}
+		} else {
+			reply.Rcode = dns.RcodeRefused
+		}
+		_ = w.WriteMsg(reply)
+	})
+	defer shutdown()
+
+	resolver, ok := probeResolver(context.Background(), scanTarget{
+		IP:     netip.MustParseAddr("127.0.0.1"),
+		Prefix: "127.0.0.1/32",
+	}, 500*time.Millisecond, port, []string{})
+	if !ok {
+		t.Fatal("expected dns host to be reachable")
+	}
+	if !resolver.RecursionAvailable {
+		t.Fatal("expected RecursionAvailable to be true")
+	}
+	if !resolver.Stable {
+		t.Fatal("expected Stable to be true when no stability domains are provided")
+	}
+}
+
 func TestScanTracksReachableAndRecursiveCounts(t *testing.T) {
 	port, shutdown := startTestDNSServer(t, func(w dns.ResponseWriter, r *dns.Msg) {
 		reply := new(dns.Msg)
@@ -187,6 +230,50 @@ func TestScanTracksReachableAndRecursiveCounts(t *testing.T) {
 	}
 	if !result.Resolvers[0].Stable {
 		t.Fatal("expected scan result to be marked stable")
+	}
+}
+
+func TestScanWaitsForProgressEmitterBeforeReturning(t *testing.T) {
+	progressStarted := make(chan struct{})
+	releaseProgress := make(chan struct{})
+	returned := make(chan struct{})
+
+	go func() {
+		_, _ = Scan(context.Background(), model.Operator{Name: "Test"}, nil, Config{
+			Workers: 1,
+			Timeout: 50 * time.Millisecond,
+		}, func(event Event) {
+			if event.Type != EventProgress {
+				return
+			}
+			select {
+			case <-progressStarted:
+			default:
+				close(progressStarted)
+			}
+			<-releaseProgress
+		})
+		close(returned)
+	}()
+
+	select {
+	case <-progressStarted:
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for progress event")
+	}
+
+	select {
+	case <-returned:
+		t.Fatal("Scan returned before the progress emitter completed")
+	case <-time.After(100 * time.Millisecond):
+	}
+
+	close(releaseProgress)
+
+	select {
+	case <-returned:
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for Scan to return")
 	}
 }
 
