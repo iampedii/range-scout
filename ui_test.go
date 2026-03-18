@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gdamore/tcell/v2"
 	"github.com/rivo/tview"
 
 	"range-scout/internal/export"
@@ -177,6 +178,28 @@ func TestNewUIDefaultsScannerPortAndProtocol(t *testing.T) {
 	}
 	if u.scanProtocol != string(scanner.ProtocolUDP) {
 		t.Fatalf("unexpected default scan protocol: %q", u.scanProtocol)
+	}
+}
+
+func TestHandleKeysDoesNotTriggerHotkeysWhileEditingProbeField(t *testing.T) {
+	u := newUI()
+	u.mode = screenScanner
+	u.rebuildForm()
+
+	probeFieldIndex := 7
+	u.form.SetFocus(probeFieldIndex)
+	u.app.SetFocus(u.form)
+
+	if !u.focusIsEditable() {
+		t.Fatal("expected probe field focus to be treated as editable")
+	}
+
+	event := tcell.NewEventKey(tcell.KeyRune, 'p', tcell.ModNone)
+	if got := u.handleKeys(event); got != event {
+		t.Fatal("expected key event to be passed through while editing")
+	}
+	if u.mode != screenScanner {
+		t.Fatalf("expected mode to stay on scanner while editing, got %q", u.mode)
 	}
 }
 

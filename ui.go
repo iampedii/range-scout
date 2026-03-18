@@ -322,12 +322,33 @@ func (u *ui) reverseFocus() {
 }
 
 func (u *ui) focusIsEditable() bool {
+	if formHasEditableFocus(u.form) {
+		return true
+	}
+
 	switch u.app.GetFocus().(type) {
 	case *tview.InputField, *tview.DropDown:
 		return true
 	default:
 		return false
 	}
+}
+
+func formHasEditableFocus(form *tview.Form) bool {
+	if form == nil {
+		return false
+	}
+	for index := 0; index < form.GetFormItemCount(); index++ {
+		item := form.GetFormItem(index)
+		if item == nil || !item.HasFocus() {
+			continue
+		}
+		switch item.(type) {
+		case *tview.InputField, *tview.DropDown:
+			return true
+		}
+	}
+	return false
 }
 
 func (u *ui) selectedOperator() model.Operator {
