@@ -1,0 +1,5 @@
+exports/
+*.out
+.DS_Store
+range-scout
+bin/

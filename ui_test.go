@@ -1,0 +1,183 @@
+package main
+
+import (
+	"regexp"
+	"testing"
+	"time"
+
+	"github.com/rivo/tview"
+
+	"range-scout/internal/export"
+	"range-scout/internal/model"
+)
+
+func TestFilterScanResultRecursiveOnly(t *testing.T) {
+	result := model.ScanResult{
+		Resolvers: []model.Resolver{
+			{IP: "198.51.100.10", DNSReachable: true, RecursionAvailable: true},
+			{IP: "198.51.100.11", DNSReachable: true, RecursionAvailable: false},
+		},
+		ReachableCount: 2,
+		RecursiveCount: 1,
+	}
+
+	filtered := filterScanResult(result, scanSaveRecursiveOnly)
+	if len(filtered.Resolvers) != 1 {
+		t.Fatalf("expected 1 resolver after filtering, got %d", len(filtered.Resolvers))
+	}
+	if filtered.Resolvers[0].IP != "198.51.100.10" {
+		t.Fatalf("unexpected resolver kept: %s", filtered.Resolvers[0].IP)
+	}
+	if filtered.ReachableCount != 1 || filtered.RecursiveCount != 1 {
+		t.Fatalf("unexpected counts: reachable=%d recursive=%d", filtered.ReachableCount, filtered.RecursiveCount)
+	}
+}
+
+func TestFilterScanResultAllDNSHosts(t *testing.T) {
+	result := model.ScanResult{
+		Resolvers: []model.Resolver{
+			{IP: "198.51.100.10", DNSReachable: true, RecursionAvailable: true},
+			{IP: "198.51.100.11", DNSReachable: true, RecursionAvailable: false},
+		},
+	}
+
+	filtered := filterScanResult(result, scanSaveAllDNSHosts)
+	if len(filtered.Resolvers) != 2 {
+		t.Fatalf("expected 2 resolvers after filtering, got %d", len(filtered.Resolvers))
+	}
+	if filtered.ReachableCount != 2 || filtered.RecursiveCount != 1 {
+		t.Fatalf("unexpected counts: reachable=%d recursive=%d", filtered.ReachableCount, filtered.RecursiveCount)
+	}
+}
+
+func TestPrefixesFormShowsScanButtonsOnlyAfterFetch(t *testing.T) {
+	u := newUI()
+	u.mode = screenOperators
+	u.rebuildForm()
+
+	if u.hasButton("Scan Setup") {
+		t.Fatal("expected no Scan Setup button before fetch")
+	}
+	if u.hasButton("Start Scan") {
+		t.Fatal("expected no Start Scan button before fetch")
+	}
+
+	operator := u.selectedOperator()
+	u.lookupCache[operator.Key] = model.LookupResult{
+		Operator: operator,
+		Entries: []model.PrefixEntry{
+			{Prefix: "198.51.100.0/24"},
+		},
+	}
+	u.rebuildForm()
+
+	if !u.hasButton("Scan Setup") {
+		t.Fatal("expected Scan Setup button after fetch")
+	}
+	if u.hasButton("Start Scan") {
+		t.Fatal("expected Start Scan button to stay hidden on the prefixes page")
+	}
+}
+
+func TestRebuildFormUpdatesPathForSelectedOperator(t *testing.T) {
+	u := newUI()
+	u.mode = screenOperators
+	u.selected = 1
+	u.updateDefaultPaths()
+	u.rebuildForm()
+
+	field, ok := u.form.GetFormItem(1).(*tview.InputField)
+	if !ok {
+		t.Fatalf("expected path form item to be an input field, got %T", u.form.GetFormItem(1))
+	}
+
+	pattern := regexp.MustCompile(`^exports/irancell_prefixes_\d{8}_\d{6}_\d{6}\.csv$`)
+	if got := field.GetText(); !pattern.MatchString(got) {
+		t.Fatalf("unexpected path field text: %q", got)
+	}
+}
+
+func TestDefaultOutputPathIncludesTimestamp(t *testing.T) {
+	ts := time.Date(2026, time.March, 18, 12, 34, 56, 789000000, time.UTC)
+	got := defaultOutputPathAt("mci", "prefixes", export.FormatCSV, ts)
+	want := "exports/mci_prefixes_20260318_123456_789000.csv"
+	if got != want {
+		t.Fatalf("unexpected timestamped output path: got %q want %q", got, want)
+	}
+}
+
+func TestSelectedScanEntriesUsesSingleChosenRange(t *testing.T) {
+	u := newUI()
+	operator := u.selectedOperator()
+	u.lookupCache[operator.Key] = model.LookupResult{
+		Operator: operator,
+		Entries: []model.PrefixEntry{
+			{Prefix: "198.51.100.0/24", ScanHosts: 254},
+			{Prefix: "198.51.101.0/24", ScanHosts: 254},
+		},
+	}
+
+	u.ensureScanRangeSelection(operator.Key)
+	if got := u.selectedScanRange(operator.Key); got != "198.51.100.0/24" {
+		t.Fatalf("unexpected default scan range: %s", got)
+	}
+
+	u.scanRanges[operator.Key] = "198.51.101.0/24"
+	entries, err := u.selectedScanEntries(operator.Key)
+	if err != nil {
+		t.Fatalf("selectedScanEntries returned error: %v", err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("expected exactly one selected entry, got %d", len(entries))
+	}
+	if entries[0].Prefix != "198.51.101.0/24" {
+		t.Fatalf("unexpected selected prefix: %s", entries[0].Prefix)
+	}
+}
+
+func TestScanConfigNormalizesProbeURLs(t *testing.T) {
+	u := newUI()
+	u.scanProbeURL1 = "https://github.com/login"
+	u.scanProbeURL2 = "example.com/docs"
+
+	cfg, err := u.scanConfig()
+	if err != nil {
+		t.Fatalf("scanConfig returned error: %v", err)
+	}
+	if len(cfg.StabilityDomains) != 2 {
+		t.Fatalf("expected 2 stability domains, got %d", len(cfg.StabilityDomains))
+	}
+	if cfg.StabilityDomains[0] != "github.com." {
+		t.Fatalf("unexpected first stability domain: %s", cfg.StabilityDomains[0])
+	}
+	if cfg.StabilityDomains[1] != "example.com." {
+		t.Fatalf("unexpected second stability domain: %s", cfg.StabilityDomains[1])
+	}
+}
+
+func TestScannerFormHidesPrefixActionsAndShowsBack(t *testing.T) {
+	u := newUI()
+	operator := u.selectedOperator()
+	u.lookupCache[operator.Key] = model.LookupResult{
+		Operator: operator,
+		Entries: []model.PrefixEntry{
+			{Prefix: "198.51.100.0/24", ScanHosts: 254},
+		},
+	}
+
+	u.mode = screenScanner
+	u.rebuildForm()
+
+	if u.hasButton("Fetch") {
+		t.Fatal("expected scanner form to hide Fetch button")
+	}
+	if u.hasButton("Save Pfx") {
+		t.Fatal("expected scanner form to hide Save Pfx button")
+	}
+	if !u.hasButton("Back") {
+		t.Fatal("expected scanner form to show Back button")
+	}
+	if !u.hasButton("Start Scan") {
+		t.Fatal("expected scanner form to show Start Scan button")
+	}
+}
