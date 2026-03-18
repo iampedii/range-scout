@@ -76,6 +76,8 @@ type ui struct {
 	scanWorkers         string
 	scanTimeoutMS       string
 	scanHostLimit       string
+	scanPort            string
+	scanProtocol        string
 	scanProbeURL1       string
 	scanProbeURL2       string
 	activityLines       []string
@@ -107,6 +109,8 @@ func newUI() *ui {
 		scanWorkers:   "256",
 		scanTimeoutMS: "1200",
 		scanHostLimit: "50000",
+		scanPort:      "53",
+		scanProtocol:  string(scanner.ProtocolUDP),
 		scanProbeURL1: "https://github.com",
 		scanProbeURL2: "https://example.com",
 	}
@@ -373,7 +377,9 @@ func (u *ui) rebuildForm() {
 		u.form.AddFormItem(u.newInput("Workers", u.scanWorkers, func(value string) { u.scanWorkers = value }))
 		u.form.AddFormItem(u.newInput("Timeout", u.scanTimeoutMS, func(value string) { u.scanTimeoutMS = value }))
 		u.form.AddFormItem(u.newInput("Host Limit", u.scanHostLimit, func(value string) { u.scanHostLimit = value }))
-		u.form.AddFormItem(u.newReadOnlyInput("Probe Note", "Choose sites reachable in your network"))
+		u.form.AddFormItem(u.newInput("Port", u.scanPort, func(value string) { u.scanPort = value }))
+		u.form.AddFormItem(u.newScanProtocolDropDown("Protocol", u.scanProtocol, func(value string) { u.scanProtocol = value }))
+		u.form.AddFormItem(u.newReadOnlyInput("Probe Note", "Make sure each probe is accessible through your network"))
 		u.form.AddFormItem(u.newInput("Probe URL 1", u.scanProbeURL1, func(value string) { u.scanProbeURL1 = value }))
 		u.form.AddFormItem(u.newInput("Probe URL 2", u.scanProbeURL2, func(value string) { u.scanProbeURL2 = value }))
 		u.form.AddFormItem(u.newFormatDropDown("Format", u.scanFormat, func(value string) {
@@ -501,6 +507,25 @@ func (u *ui) newScanSaveScopeDropDown(label string, selected scanSaveScope, onCh
 	dropdown.SetSelectedFunc(func(text string, index int) {
 		if text != "" {
 			onChange(scanSaveScope(text))
+		}
+	})
+	return dropdown
+}
+
+func (u *ui) newScanProtocolDropDown(label, selected string, onChange func(string)) *tview.DropDown {
+	options := []string{string(scanner.ProtocolUDP), string(scanner.ProtocolTCP), string(scanner.ProtocolBoth)}
+	currentIndex := 0
+	for i, option := range options {
+		if option == selected {
+			currentIndex = i
+			break
+		}
+	}
+	dropdown := tview.NewDropDown().SetLabel(label+": ").SetOptions(options, nil)
+	dropdown.SetCurrentOption(currentIndex)
+	dropdown.SetSelectedFunc(func(text string, index int) {
+		if text != "" {
+			onChange(text)
 		}
 	})
 	return dropdown
@@ -759,6 +784,7 @@ func (u *ui) renderDetails() {
 		u.details.SetTitle("DNS Scan Details")
 		progress, resolvers := u.currentScanState(operator.Key)
 		stableCount := countStableResolvers(resolvers)
+		_, hasCachedResult := u.scanCache[operator.Key]
 		fmt.Fprintf(&builder, "Selected ranges: %s\n", u.selectedScanSummary(operator.Key))
 		if entries, err := u.selectedScanEntries(operator.Key); err == nil && len(entries) > 0 {
 			fmt.Fprintf(&builder, "Selected IPs: %s\n", formatCount(totalPrefixAddresses(entries)))
@@ -766,8 +792,13 @@ func (u *ui) renderDetails() {
 				fmt.Fprintf(&builder, "  - %s (%s IPs)\n", entry.Prefix, formatCount(entry.TotalAddresses))
 			}
 		}
+		fmt.Fprintf(&builder, "Protocol: %s  Port: %s\n", displayScanProtocol(u.scanProtocol), displayScanPort(u.scanPort))
 		fmt.Fprintf(&builder, "Probe URLs: %s | %s\n", displayProbeURL(u.scanProbeURL1), displayProbeURL(u.scanProbeURL2))
-		builder.WriteString("Note: choose sites that are reachable in your network.\n")
+		builder.WriteString("Note: make sure each probe is accessible through your network.\n")
+		if !hasCachedResult && u.activeScanOperator != operator.Key {
+			builder.WriteString("\n")
+			writeScanOptionGuide(&builder)
+		}
 		fmt.Fprintf(&builder, "Targets: %s  Scanned: %s  Reachable: %s  Recursive: %s  Stable: %s  Progress: %s %s\n\n",
 			formatCount(progress.Total),
 			formatCount(progress.Scanned),
@@ -782,10 +813,12 @@ func (u *ui) renderDetails() {
 		}
 		if result, ok := u.scanCache[operator.Key]; ok {
 			fmt.Fprintf(&builder, "Last finished: %s\n", result.FinishedAt.Format("2006-01-02 15:04:05"))
-			fmt.Fprintf(&builder, "Workers: %d  Timeout: %d ms  Host Limit: %d\n",
+			fmt.Fprintf(&builder, "Workers: %d  Timeout: %d ms  Host Limit: %d  Protocol: %s  Port: %d\n",
 				result.Workers,
 				result.TimeoutMillis,
 				result.HostLimit,
+				displayScanProtocol(result.Protocol),
+				displayResultPort(result.Port),
 			)
 			fmt.Fprintf(&builder, "Export mode: %s\n", u.scanSaveScope)
 			fmt.Fprintf(&builder, "Cached reachability: %s DNS hosts  %s recursive  %s stable\n\n",
@@ -809,9 +842,10 @@ func (u *ui) renderDetails() {
 				} else if resolver.RecursionAvailable {
 					status = "recursive"
 				}
-				fmt.Fprintf(&builder, "%02d  %-15s  %-9s  RA=%-5t  %-8s  %5d ms  %s\n",
+				fmt.Fprintf(&builder, "%02d  %-15s  %-4s  %-9s  RA=%-5t  %-8s  %5d ms  %s\n",
 					index+1,
 					resolver.IP,
+					displayTransport(resolver.Transport),
 					status,
 					resolver.RecursionAdvertised,
 					resolver.ResponseCode,
@@ -940,9 +974,11 @@ func (u *ui) startScan() {
 	u.scanCancel = cancel
 	u.setStatus(fmt.Sprintf("Scanning %s...", operator.Name))
 	u.addActivity(fmt.Sprintf(
-		"Scan started for %s on %s with %d workers over %s targets",
+		"Scan started for %s on %s using %s/%d with %d workers over %s targets",
 		operator.Name,
 		u.selectedScanSummary(operator.Key),
+		cfg.Protocol,
+		cfg.Port,
 		cfg.Workers,
 		formatCount(u.liveProgress.Total),
 	))
@@ -1043,6 +1079,8 @@ func (u *ui) saveResolvers() {
 			Workers:        mustInt(u.scanWorkers, 256),
 			TimeoutMillis:  mustInt(u.scanTimeoutMS, 1200),
 			HostLimit:      mustUint64(u.scanHostLimit, 50000),
+			Port:           mustPort(u.scanPort, 53),
+			Protocol:       mustProtocol(u.scanProtocol, string(scanner.ProtocolUDP)),
 			StartedAt:      time.Now(),
 			FinishedAt:     time.Now(),
 		}
@@ -1093,6 +1131,18 @@ func (u *ui) scanConfig() (scanner.Config, error) {
 			return scanner.Config{}, fmt.Errorf("host limit must be a whole number")
 		}
 	}
+	portText := strings.TrimSpace(u.scanPort)
+	port := 53
+	if portText != "" {
+		port, err = strconv.Atoi(portText)
+		if err != nil || port <= 0 || port > 65535 {
+			return scanner.Config{}, fmt.Errorf("port must be an integer between 1 and 65535")
+		}
+	}
+	protocol, err := scanner.ParseProtocol(u.scanProtocol)
+	if err != nil {
+		return scanner.Config{}, err
+	}
 	probeDomain1, err := scanner.NormalizeProbeDomain(u.scanProbeURL1)
 	if err != nil {
 		return scanner.Config{}, fmt.Errorf("probe url 1: %w", err)
@@ -1106,6 +1156,8 @@ func (u *ui) scanConfig() (scanner.Config, error) {
 		Workers:          workers,
 		Timeout:          time.Duration(timeoutMS) * time.Millisecond,
 		HostLimit:        hostLimit,
+		Port:             port,
+		Protocol:         protocol,
 		StabilityDomains: []string{probeDomain1, probeDomain2},
 	}, nil
 }
@@ -1348,6 +1400,43 @@ func displayProbeURL(value string) string {
 	return text
 }
 
+func displayScanPort(value string) string {
+	port := mustPort(value, 53)
+	return strconv.Itoa(port)
+}
+
+func displayResultPort(value int) int {
+	if value <= 0 {
+		return 53
+	}
+	return value
+}
+
+func displayScanProtocol(value string) string {
+	return mustProtocol(value, string(scanner.ProtocolUDP))
+}
+
+func displayTransport(value string) string {
+	text := strings.TrimSpace(value)
+	if text == "" {
+		return "-"
+	}
+	return text
+}
+
+func writeScanOptionGuide(builder *strings.Builder) {
+	builder.WriteString("Commands - DNS Scan\n")
+	builder.WriteString("  - Ranges: CIDRs selected for this scan. Use Pick Range to change them.\n")
+	builder.WriteString("  - Workers: number of concurrent DNS probes. Higher is faster but heavier.\n")
+	builder.WriteString("  - Timeout: per-request timeout in milliseconds.\n")
+	builder.WriteString("  - Host Limit: maximum number of hosts to scan. Leave empty or 0 for the full selection.\n")
+	builder.WriteString("  - Port: DNS port to test. Default is 53.\n")
+	builder.WriteString("  - Protocol: UDP, TCP, or BOTH. BOTH tries UDP first, then TCP.\n")
+	builder.WriteString("  - Probe URLs: two hostnames used to confirm stable recursive resolution. Make sure each probe is accessible through your network.\n")
+	builder.WriteString("  - Format / Save Scope / Path: export settings used when you press Export.\n")
+	builder.WriteString("  - Start Scan runs the scan. Export saves the latest results.\n\n")
+}
+
 func percent(scanned, total uint64) string {
 	if total == 0 {
 		return "0.0%"
@@ -1433,6 +1522,22 @@ func mustUint64(text string, fallback uint64) uint64 {
 		return fallback
 	}
 	return value
+}
+
+func mustPort(text string, fallback int) int {
+	value, err := strconv.Atoi(strings.TrimSpace(text))
+	if err != nil || value <= 0 || value > 65535 {
+		return fallback
+	}
+	return value
+}
+
+func mustProtocol(text, fallback string) string {
+	value, err := scanner.ParseProtocol(text)
+	if err != nil {
+		return fallback
+	}
+	return string(value)
 }
 
 func (u *ui) operatorName(key string) string {

@@ -47,8 +47,8 @@ func TestSaveResolversTXT(t *testing.T) {
 	result := model.ScanResult{
 		Operator: model.Operator{Name: "Irancell"},
 		Resolvers: []model.Resolver{
-			{IP: "198.51.100.10", DNSReachable: true, RecursionAvailable: true, RecursionAdvertised: true, ResponseCode: "NOERROR", LatencyMillis: 21, Prefix: "198.51.100.0/24"},
-			{IP: "198.51.100.11", DNSReachable: true, RecursionAvailable: false, RecursionAdvertised: false, ResponseCode: "REFUSED", LatencyMillis: 33, Prefix: "198.51.100.0/24"},
+			{IP: "198.51.100.10", Transport: "UDP", DNSReachable: true, RecursionAvailable: true, RecursionAdvertised: true, ResponseCode: "NOERROR", LatencyMillis: 21, Prefix: "198.51.100.0/24"},
+			{IP: "198.51.100.11", Transport: "TCP", DNSReachable: true, RecursionAvailable: false, RecursionAdvertised: false, ResponseCode: "REFUSED", LatencyMillis: 33, Prefix: "198.51.100.0/24"},
 		},
 	}
 
@@ -66,7 +66,7 @@ func TestSaveResolversTXT(t *testing.T) {
 	}
 }
 
-func TestSaveResolversCSVIncludesStableColumn(t *testing.T) {
+func TestSaveResolversCSVIncludesTransportAndStableColumns(t *testing.T) {
 	tempDir := t.TempDir()
 	path := filepath.Join(tempDir, "resolvers.csv")
 
@@ -75,6 +75,7 @@ func TestSaveResolversCSVIncludesStableColumn(t *testing.T) {
 		Resolvers: []model.Resolver{
 			{
 				IP:                  "198.51.100.10",
+				Transport:           "TCP",
 				DNSReachable:        true,
 				RecursionAvailable:  true,
 				RecursionAdvertised: true,
@@ -96,11 +97,11 @@ func TestSaveResolversCSVIncludesStableColumn(t *testing.T) {
 	}
 
 	text := string(data)
-	if !strings.Contains(text, "operator,ip,dns_reachable,recursion_available,recursion_advertised,stable,response_code,latency_ms,prefix") {
-		t.Fatalf("csv header missing stable column: %s", text)
+	if !strings.Contains(text, "operator,ip,transport,dns_reachable,recursion_available,recursion_advertised,stable,response_code,latency_ms,prefix") {
+		t.Fatalf("csv header missing transport/stable columns: %s", text)
 	}
-	if !strings.Contains(text, "TIC,198.51.100.10,true,true,true,true,NOERROR,21,198.51.100.0/24") {
-		t.Fatalf("csv row missing stable value: %s", text)
+	if !strings.Contains(text, "TIC,198.51.100.10,TCP,true,true,true,true,NOERROR,21,198.51.100.0/24") {
+		t.Fatalf("csv row missing transport/stable value: %s", text)
 	}
 }
 

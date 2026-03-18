@@ -145,13 +145,14 @@ func buildResolverTXT(result model.ScanResult) []byte {
 func buildResolverCSV(result model.ScanResult) ([]byte, error) {
 	var buffer bytes.Buffer
 	writer := csv.NewWriter(&buffer)
-	if err := writer.Write([]string{"operator", "ip", "dns_reachable", "recursion_available", "recursion_advertised", "stable", "response_code", "latency_ms", "prefix"}); err != nil {
+	if err := writer.Write([]string{"operator", "ip", "transport", "dns_reachable", "recursion_available", "recursion_advertised", "stable", "response_code", "latency_ms", "prefix"}); err != nil {
 		return nil, err
 	}
 	for _, resolver := range result.Resolvers {
 		record := []string{
 			result.Operator.Name,
 			resolver.IP,
+			resolver.Transport,
 			fmt.Sprintf("%t", resolver.DNSReachable),
 			fmt.Sprintf("%t", resolver.RecursionAvailable),
 			fmt.Sprintf("%t", resolver.RecursionAdvertised),

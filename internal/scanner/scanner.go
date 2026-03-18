@@ -27,8 +27,17 @@ type Config struct {
 	Timeout          time.Duration
 	HostLimit        uint64
 	Port             int
+	Protocol         Protocol
 	StabilityDomains []string
 }
+
+type Protocol string
+
+const (
+	ProtocolUDP  Protocol = "UDP"
+	ProtocolTCP  Protocol = "TCP"
+	ProtocolBoth Protocol = "BOTH"
+)
 
 type EventType string
 
@@ -85,6 +94,7 @@ func Scan(
 	if targetPort <= 0 {
 		targetPort = 53
 	}
+	targetProtocol := normalizeProtocol(cfg.Protocol)
 	stabilityDomains := configuredStabilityDomains(cfg.StabilityDomains)
 
 	progressDone := make(chan struct{})
@@ -127,7 +137,7 @@ func Scan(
 		go func() {
 			defer workerWG.Done()
 			for target := range jobs {
-				resolver, ok := probeResolver(ctx, target, cfg.Timeout, targetPort, stabilityDomains)
+				resolver, ok := probeResolver(ctx, target, cfg.Timeout, targetPort, targetProtocol, stabilityDomains)
 				scanned.Add(1)
 				if ok {
 					reachable.Add(1)
@@ -196,6 +206,8 @@ func Scan(
 	result.ScannedTargets = scanned.Load()
 	result.ReachableCount = reachable.Load()
 	result.RecursiveCount = recursive.Load()
+	result.Port = targetPort
+	result.Protocol = string(targetProtocol)
 	result.FinishedAt = time.Now()
 
 	if errors.Is(ctx.Err(), context.Canceled) {
@@ -209,13 +221,14 @@ func Scan(
 	return result, nil
 }
 
-func probeResolver(ctx context.Context, target scanTarget, timeout time.Duration, port int, stabilityDomains []string) (model.Resolver, bool) {
-	reachabilityResponse, reachabilityLatency, ok := probeDNSReachable(ctx, target.IP, timeout, port)
+func probeResolver(ctx context.Context, target scanTarget, timeout time.Duration, port int, protocol Protocol, stabilityDomains []string) (model.Resolver, bool) {
+	reachabilityResponse, reachabilityLatency, reachabilityProtocol, ok := probeDNSReachable(ctx, target.IP, timeout, port, protocol)
 	if !ok {
 		return model.Resolver{}, false
 	}
 
 	resolver := model.Resolver{
+		Transport:           string(reachabilityProtocol),
 		IP:                  target.IP.String(),
 		Prefix:              target.Prefix,
 		DNSReachable:        true,
@@ -226,45 +239,47 @@ func probeResolver(ctx context.Context, target scanTarget, timeout time.Duration
 		Stable:              false,
 	}
 
-	recursionResponse, recursionLatency, recursionOK := probeLookup(ctx, target.IP, timeout, port, "google.com.", true)
+	recursionResponse, recursionLatency, recursionProtocol, recursionOK := probeLookup(ctx, target.IP, timeout, port, protocol, "google.com.", true)
 	if recursionResponse != nil {
+		resolver.Transport = string(recursionProtocol)
 		resolver.RecursionAdvertised = recursionResponse.RecursionAvailable
 		resolver.ResponseCode = dnsResponseCodeLabel(recursionResponse.Rcode)
 		resolver.LatencyMillis = recursionLatency
 	}
 	if recursionOK {
 		resolver.RecursionAvailable = true
-		resolver.Stable = probeStability(ctx, target.IP, timeout, port, stabilityDomains)
+		resolver.Stable = probeStability(ctx, target.IP, timeout, port, protocol, stabilityDomains)
 	}
 
 	return resolver, true
 }
 
-func probeDNSReachable(ctx context.Context, addr netip.Addr, timeout time.Duration, port int) (*dns.Msg, int64, bool) {
-	response, rtt, err := exchangeLookup(ctx, addr, timeout, port, "example.com.", false)
-	if err != nil || response == nil || !response.Response {
-		return nil, 0, false
+func probeDNSReachable(ctx context.Context, addr netip.Addr, timeout time.Duration, port int, protocol Protocol) (*dns.Msg, int64, Protocol, bool) {
+	response, rtt, matchedProtocol, ok := exchangeAcrossProtocols(ctx, addr, timeout, port, protocol, "example.com.", false, func(response *dns.Msg) bool {
+		return response.Response
+	})
+	if response == nil || !ok {
+		return nil, 0, "", false
 	}
-	return response, max(rtt.Milliseconds(), int64(1)), true
+	return response, max(rtt.Milliseconds(), int64(1)), matchedProtocol, true
 }
 
-func probeLookup(ctx context.Context, addr netip.Addr, timeout time.Duration, port int, domain string, recursive bool) (*dns.Msg, int64, bool) {
-	response, rtt, err := exchangeLookup(ctx, addr, timeout, port, domain, recursive)
-	if err != nil || response == nil || !response.Response {
-		return nil, 0, false
+func probeLookup(ctx context.Context, addr netip.Addr, timeout time.Duration, port int, protocol Protocol, domain string, recursive bool) (*dns.Msg, int64, Protocol, bool) {
+	response, rtt, matchedProtocol, ok := exchangeAcrossProtocols(ctx, addr, timeout, port, protocol, domain, recursive, func(response *dns.Msg) bool {
+		return response.Rcode == dns.RcodeSuccess && len(response.Answer) > 0
+	})
+	if response == nil {
+		return nil, 0, "", false
 	}
-	if response.Rcode != dns.RcodeSuccess || len(response.Answer) == 0 {
-		return response, max(rtt.Milliseconds(), int64(1)), false
-	}
-	return response, max(rtt.Milliseconds(), int64(1)), true
+	return response, max(rtt.Milliseconds(), int64(1)), matchedProtocol, ok
 }
 
-func probeStability(ctx context.Context, addr netip.Addr, timeout time.Duration, port int, stabilityDomains []string) bool {
+func probeStability(ctx context.Context, addr netip.Addr, timeout time.Duration, port int, protocol Protocol, stabilityDomains []string) bool {
 	for _, domain := range stabilityDomains {
 		if ctx.Err() != nil {
 			return false
 		}
-		_, _, ok := probeLookup(ctx, addr, timeout, port, domain, true)
+		_, _, _, ok := probeLookup(ctx, addr, timeout, port, protocol, domain, true)
 		if !ok {
 			return false
 		}
@@ -272,17 +287,65 @@ func probeStability(ctx context.Context, addr netip.Addr, timeout time.Duration,
 	return true
 }
 
-func exchangeLookup(ctx context.Context, addr netip.Addr, timeout time.Duration, port int, domain string, recursive bool) (*dns.Msg, time.Duration, error) {
+func exchangeAcrossProtocols(
+	ctx context.Context,
+	addr netip.Addr,
+	timeout time.Duration,
+	port int,
+	protocol Protocol,
+	domain string,
+	recursive bool,
+	success func(*dns.Msg) bool,
+) (*dns.Msg, time.Duration, Protocol, bool) {
+	var fallbackResponse *dns.Msg
+	var fallbackRTT time.Duration
+	var fallbackProtocol Protocol
+
+	for _, candidate := range protocolCandidates(protocol) {
+		response, rtt, err := exchangeLookup(ctx, addr, timeout, port, candidate, domain, recursive)
+		if err != nil || response == nil || !response.Response {
+			continue
+		}
+		if fallbackResponse == nil {
+			fallbackResponse = response
+			fallbackRTT = rtt
+			fallbackProtocol = candidate
+		}
+		if success(response) {
+			return response, rtt, candidate, true
+		}
+	}
+
+	if fallbackResponse != nil {
+		return fallbackResponse, fallbackRTT, fallbackProtocol, false
+	}
+	return nil, 0, "", false
+}
+
+func exchangeLookup(ctx context.Context, addr netip.Addr, timeout time.Duration, port int, protocol Protocol, domain string, recursive bool) (*dns.Msg, time.Duration, error) {
 	message := new(dns.Msg)
 	message.SetQuestion(domain, dns.TypeA)
 	message.RecursionDesired = recursive
 
 	client := &dns.Client{
-		Net:     "udp",
+		Net:     dnsNetwork(protocol),
 		Timeout: timeout,
 	}
 
 	return client.ExchangeContext(ctx, message, net.JoinHostPort(addr.String(), strconv.Itoa(port)))
+}
+
+func ParseProtocol(value string) (Protocol, error) {
+	switch strings.ToUpper(strings.TrimSpace(value)) {
+	case "", string(ProtocolUDP):
+		return ProtocolUDP, nil
+	case string(ProtocolTCP):
+		return ProtocolTCP, nil
+	case string(ProtocolBoth):
+		return ProtocolBoth, nil
+	default:
+		return "", fmt.Errorf("unsupported protocol %q", value)
+	}
 }
 
 func NormalizeProbeDomain(input string) (string, error) {
@@ -310,6 +373,34 @@ func configuredStabilityDomains(domains []string) []string {
 		return append([]string(nil), defaultStabilityDomains...)
 	}
 	return append([]string(nil), domains...)
+}
+
+func normalizeProtocol(value Protocol) Protocol {
+	parsed, err := ParseProtocol(string(value))
+	if err != nil {
+		return ProtocolUDP
+	}
+	return parsed
+}
+
+func protocolCandidates(value Protocol) []Protocol {
+	switch normalizeProtocol(value) {
+	case ProtocolTCP:
+		return []Protocol{ProtocolTCP}
+	case ProtocolBoth:
+		return []Protocol{ProtocolUDP, ProtocolTCP}
+	default:
+		return []Protocol{ProtocolUDP}
+	}
+}
+
+func dnsNetwork(value Protocol) string {
+	switch normalizeProtocol(value) {
+	case ProtocolTCP:
+		return "tcp"
+	default:
+		return "udp"
+	}
 }
 
 func dnsResponseCodeLabel(code int) string {

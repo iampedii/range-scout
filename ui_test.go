@@ -2,6 +2,7 @@ package main
 
 import (
 	"regexp"
+	"strings"
 	"testing"
 	"time"
 
@@ -9,6 +10,7 @@ import (
 
 	"range-scout/internal/export"
 	"range-scout/internal/model"
+	"range-scout/internal/scanner"
 )
 
 func TestFilterScanResultRecursiveOnly(t *testing.T) {
@@ -141,6 +143,8 @@ func TestSelectedScanEntriesUsesMultipleChosenRanges(t *testing.T) {
 
 func TestScanConfigNormalizesProbeURLs(t *testing.T) {
 	u := newUI()
+	u.scanPort = "5353"
+	u.scanProtocol = string(scanner.ProtocolBoth)
 	u.scanProbeURL1 = "https://github.com/login"
 	u.scanProbeURL2 = "example.com/docs"
 
@@ -156,6 +160,23 @@ func TestScanConfigNormalizesProbeURLs(t *testing.T) {
 	}
 	if cfg.StabilityDomains[1] != "example.com." {
 		t.Fatalf("unexpected second stability domain: %s", cfg.StabilityDomains[1])
+	}
+	if cfg.Port != 5353 {
+		t.Fatalf("unexpected scan port: %d", cfg.Port)
+	}
+	if cfg.Protocol != scanner.ProtocolBoth {
+		t.Fatalf("unexpected scan protocol: %s", cfg.Protocol)
+	}
+}
+
+func TestNewUIDefaultsScannerPortAndProtocol(t *testing.T) {
+	u := newUI()
+
+	if u.scanPort != "53" {
+		t.Fatalf("unexpected default scan port: %q", u.scanPort)
+	}
+	if u.scanProtocol != string(scanner.ProtocolUDP) {
+		t.Fatalf("unexpected default scan protocol: %q", u.scanProtocol)
 	}
 }
 
@@ -183,6 +204,57 @@ func TestScannerFormHidesPrefixActionsAndShowsBack(t *testing.T) {
 	}
 	if !u.hasButton("Start Scan") {
 		t.Fatal("expected scanner form to show Start Scan button")
+	}
+}
+
+func TestScannerDetailsShowGuideBeforeFirstScan(t *testing.T) {
+	u := newUI()
+	operator := u.selectedOperator()
+	u.lookupCache[operator.Key] = model.LookupResult{
+		Operator: operator,
+		Entries: []model.PrefixEntry{
+			{Prefix: "198.51.100.0/24", TotalAddresses: 256, ScanHosts: 254},
+		},
+	}
+
+	u.mode = screenScanner
+	u.ensureScanRangeSelection(operator.Key)
+	u.renderDetails()
+
+	text := u.details.GetText(true)
+	if !strings.Contains(text, "Commands - DNS Scan") {
+		t.Fatalf("expected pre-scan guide in details pane, got: %s", text)
+	}
+	if !strings.Contains(text, "Port: DNS port to test. Default is 53.") {
+		t.Fatalf("expected port guide in details pane, got: %s", text)
+	}
+}
+
+func TestScannerDetailsHideGuideAfterCachedScan(t *testing.T) {
+	u := newUI()
+	operator := u.selectedOperator()
+	u.lookupCache[operator.Key] = model.LookupResult{
+		Operator: operator,
+		Entries: []model.PrefixEntry{
+			{Prefix: "198.51.100.0/24", TotalAddresses: 256, ScanHosts: 254},
+		},
+	}
+	u.scanCache[operator.Key] = model.ScanResult{
+		Operator:      operator,
+		FinishedAt:    time.Now(),
+		Protocol:      string(scanner.ProtocolUDP),
+		Port:          53,
+		Workers:       256,
+		TimeoutMillis: 1200,
+	}
+
+	u.mode = screenScanner
+	u.ensureScanRangeSelection(operator.Key)
+	u.renderDetails()
+
+	text := u.details.GetText(true)
+	if strings.Contains(text, "Commands - DNS Scan") {
+		t.Fatalf("expected pre-scan guide to be hidden after a cached scan, got: %s", text)
 	}
 }
 

@@ -28,6 +28,7 @@ type LookupResult struct {
 
 type Resolver struct {
 	IP                  string `json:"ip"`
+	Transport           string `json:"transport,omitempty"`
 	Prefix              string `json:"prefix"`
 	DNSReachable        bool   `json:"dns_reachable"`
 	RecursionAvailable  bool   `json:"recursion_available"`
@@ -48,6 +49,8 @@ type ScanResult struct {
 	Workers        int           `json:"workers"`
 	TimeoutMillis  int           `json:"timeout_ms"`
 	HostLimit      uint64        `json:"host_limit"`
+	Port           int           `json:"port"`
+	Protocol       string        `json:"protocol,omitempty"`
 	StartedAt      time.Time     `json:"started_at"`
 	FinishedAt     time.Time     `json:"finished_at"`
 	Warnings       []string      `json:"warnings,omitempty"`
