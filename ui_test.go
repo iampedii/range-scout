@@ -281,6 +281,77 @@ func TestScannerDetailsHideGuideAfterCachedScan(t *testing.T) {
 	}
 }
 
+func TestRenderStatusShowsLiveScanMetrics(t *testing.T) {
+	u := newUI()
+	operator := u.selectedOperator()
+	u.mode = screenScanner
+	u.lastStatusLine = "Scanning MCI..."
+	u.activeScanOperator = operator.Key
+	u.scanCancel = func() {}
+	u.liveProgress = scanProgress{
+		Scanned:   25,
+		Total:     100,
+		Reachable: 6,
+		Recursive: 3,
+	}
+	u.liveResolvers = []model.Resolver{
+		{IP: "198.51.100.10", Stable: true},
+		{IP: "198.51.100.11", Stable: false},
+	}
+
+	u.renderStatus()
+
+	text := u.status.GetText(true)
+	if !strings.Contains(text, "Scanning MCI... (dns mode)") {
+		t.Fatalf("expected status headline, got: %s", text)
+	}
+	if !strings.Contains(text, "scanned 25/100") {
+		t.Fatalf("expected live scan counters in status, got: %s", text)
+	}
+	if !strings.Contains(text, "reachable 6") || !strings.Contains(text, "recursive 3") || !strings.Contains(text, "stable 1") {
+		t.Fatalf("expected live metrics in status, got: %s", text)
+	}
+}
+
+func TestScannerDetailsHideCachedResultsWhileNewScanIsRunning(t *testing.T) {
+	u := newUI()
+	operator := u.selectedOperator()
+	u.lookupCache[operator.Key] = model.LookupResult{
+		Operator: operator,
+		Entries: []model.PrefixEntry{
+			{Prefix: "198.51.100.0/24", TotalAddresses: 256, ScanHosts: 254},
+		},
+	}
+	u.scanCache[operator.Key] = model.ScanResult{
+		Operator:      operator,
+		FinishedAt:    time.Now(),
+		Resolvers:     []model.Resolver{{IP: "198.51.100.10", Prefix: "198.51.100.0/24"}},
+		Protocol:      string(scanner.ProtocolUDP),
+		Port:          53,
+		Workers:       256,
+		TimeoutMillis: 1200,
+	}
+	u.mode = screenScanner
+	u.activeScanOperator = operator.Key
+	u.scanCancel = func() {}
+	u.liveProgress = scanProgress{Total: 254}
+	u.liveResolvers = nil
+	u.ensureScanRangeSelection(operator.Key)
+
+	u.renderDetails()
+
+	text := u.details.GetText(true)
+	if strings.Contains(text, "Last finished:") {
+		t.Fatalf("expected cached result header to be hidden during active scan, got: %s", text)
+	}
+	if strings.Contains(text, "198.51.100.10") {
+		t.Fatalf("expected old resolver rows to be hidden during active scan, got: %s", text)
+	}
+	if !strings.Contains(text, "Live scan progress is shown in Status.") {
+		t.Fatalf("expected active scan note in details, got: %s", text)
+	}
+}
+
 func TestFilterPrefixEntryIndexes(t *testing.T) {
 	entries := []model.PrefixEntry{
 		{Prefix: "198.51.100.0/24"},

@@ -135,7 +135,7 @@ func newUI() *ui {
 	main := tview.NewFlex().SetDirection(tview.FlexRow).
 		AddItem(u.header, 3, 0, false).
 		AddItem(body, 0, 1, true).
-		AddItem(u.status, 2, 0, false)
+		AddItem(u.status, 4, 0, false)
 
 	u.pages.AddPage("main", main, true, true)
 	u.app.SetRoot(u.pages, true)
@@ -556,6 +556,7 @@ func (u *ui) renderAll() {
 	u.renderHeader()
 	u.renderDetails()
 	u.renderActivity()
+	u.renderStatus()
 }
 
 func (u *ui) renderHeader() {
@@ -806,6 +807,7 @@ func (u *ui) renderDetails() {
 		progress, resolvers := u.currentScanState(operator.Key)
 		stableCount := countStableResolvers(resolvers)
 		_, hasCachedResult := u.scanCache[operator.Key]
+		activeScanForCurrentOperator := u.activeScanOperator == operator.Key && u.scanCancel != nil
 		fmt.Fprintf(&builder, "Selected ranges: %s\n", u.selectedScanSummary(operator.Key))
 		if entries, err := u.selectedScanEntries(operator.Key); err == nil && len(entries) > 0 {
 			fmt.Fprintf(&builder, "Selected IPs: %s\n", formatCount(totalPrefixAddresses(entries)))
@@ -820,19 +822,24 @@ func (u *ui) renderDetails() {
 			builder.WriteString("\n")
 			writeScanOptionGuide(&builder)
 		}
-		fmt.Fprintf(&builder, "Targets: %s  Scanned: %s  Reachable: %s  Recursive: %s  Stable: %s  Progress: %s %s\n\n",
-			formatCount(progress.Total),
-			formatCount(progress.Scanned),
-			formatCount(progress.Reachable),
-			formatCount(progress.Recursive),
-			formatCount(stableCount),
-			meterBar(progress.Scanned, progress.Total, 20),
-			percent(progress.Scanned, progress.Total),
-		)
+		if activeScanForCurrentOperator {
+			builder.WriteString("\n")
+			builder.WriteString("Live scan progress is shown in Status.\n\n")
+		} else {
+			fmt.Fprintf(&builder, "Targets: %s  Scanned: %s  Reachable: %s  Recursive: %s  Stable: %s  Progress: %s %s\n\n",
+				formatCount(progress.Total),
+				formatCount(progress.Scanned),
+				formatCount(progress.Reachable),
+				formatCount(progress.Recursive),
+				formatCount(stableCount),
+				meterBar(progress.Scanned, progress.Total, 20),
+				percent(progress.Scanned, progress.Total),
+			)
+		}
 		if u.activeScanOperator != "" && u.activeScanOperator != operator.Key {
 			fmt.Fprintf(&builder, "Background scan running for %s.\n\n", u.operatorName(u.activeScanOperator))
 		}
-		if result, ok := u.scanCache[operator.Key]; ok {
+		if result, ok := u.scanCache[operator.Key]; ok && !activeScanForCurrentOperator {
 			fmt.Fprintf(&builder, "Last finished: %s\n", result.FinishedAt.Format("2006-01-02 15:04:05"))
 			fmt.Fprintf(&builder, "Workers: %d  Timeout: %d ms  Host Limit: %d  Protocol: %s  Port: %d\n",
 				result.Workers,
@@ -847,13 +854,19 @@ func (u *ui) renderDetails() {
 				formatCount(result.RecursiveCount),
 				formatCount(countStableResolvers(result.Resolvers)),
 			)
-		} else {
+		} else if !activeScanForCurrentOperator {
 			fmt.Fprintf(&builder, "Export mode: %s\n\n", u.scanSaveScope)
 			builder.WriteString("No completed scan cached for this operator.\n\n")
+		} else {
+			fmt.Fprintf(&builder, "Export mode: %s\n\n", u.scanSaveScope)
 		}
 		if len(resolvers) == 0 {
-			builder.WriteString("No DNS services reached yet.\n")
-			builder.WriteString("Fetch prefixes, then start a scan with the form or press 'g'.\n")
+			if activeScanForCurrentOperator {
+				builder.WriteString("No DNS services reached yet for this run.\n")
+			} else {
+				builder.WriteString("No DNS services reached yet.\n")
+				builder.WriteString("Fetch prefixes, then start a scan with the form or press 'g'.\n")
+			}
 		} else {
 			builder.WriteString("DNS Hosts\n")
 			for index, resolver := range resolvers {
@@ -1335,12 +1348,31 @@ func (u *ui) confirmExit() {
 
 func (u *ui) setStatus(message string) {
 	u.lastStatusLine = message
+	u.renderStatus()
+}
+
+func (u *ui) renderStatus() {
 	modeLabel := "prefix mode"
 	if u.mode == screenScanner {
 		modeLabel = "dns mode"
 	}
-	help := "Enter fetches from the list. Tab cycles focus. Mouse works on the list and form."
-	u.status.SetText(fmt.Sprintf("%s (%s)\n%s", message, modeLabel, help))
+	line1 := fmt.Sprintf("%s (%s)", u.lastStatusLine, modeLabel)
+	line2 := "Enter fetches from the list. Tab cycles focus. Mouse works on the list and form."
+	if u.scanRunning() {
+		progress, resolvers := u.currentScanState(u.activeScanOperator)
+		line2 = fmt.Sprintf(
+			"Scan %s: %s %s  scanned %s/%s  reachable %s  recursive %s  stable %s",
+			u.operatorName(u.activeScanOperator),
+			meterBar(progress.Scanned, progress.Total, 16),
+			percent(progress.Scanned, progress.Total),
+			formatCount(progress.Scanned),
+			formatCount(progress.Total),
+			formatCount(progress.Reachable),
+			formatCount(progress.Recursive),
+			formatCount(countStableResolvers(resolvers)),
+		)
+	}
+	u.status.SetText(fmt.Sprintf("%s\n%s", line1, line2))
 }
 
 func (u *ui) addActivity(message string) {
