@@ -54,8 +54,8 @@ go run .
 3. Click `Load Targets` to load operator prefixes, set `Import File` and click `Import TXT`, or click `Paste Targets` and paste directly into the modal.
 4. Click `Scan Setup`.
 5. Click `Pick Targets`, use the filter box if needed, and choose one or more CIDRs or single IPs. New target sets start with all targets selected, and the picker has `Select All` / `Deselect All` actions.
-6. Set the port, protocol, and probe URLs.
-   Choose sites that are reachable in your network.
+6. Set the port, protocol, recursion host, and probe hosts.
+   Enter hostnames only, without `http://` or `https://`.
 7. Click `Start Scan`.
 8. If you want DNSTT validation, set `DNSTT Domain`. Leave `DNSTT Pubkey` empty for tunnel-only checks, or set it for full end-to-end validation. `E2E Port` defaults to `53`, and the final `SOCKS5 CONNECT` target is the resolver IP currently being tested on that port.
 9. Leave `Query Size` empty unless you specifically want to pass `-mtu` to `dnstt-client` and your installed binary supports it.
@@ -84,15 +84,16 @@ What to do:
 1. Choose `Automatic API Fetch` if you want to load operator prefixes from a selected operator. If no operator is selected, use `Import TXT` or `Paste Targets`.
 2. For file import or pasted text, put one IPv4 CIDR or IPv4 address on each line. Empty lines and `#` comments are ignored.
 3. Load the targets first.
-4. Use `Pick Targets` to limit the scan to the CIDRs or single IPs you want. All loaded targets start selected by default, and you can use `Select All` / `Deselect All` in the picker.
+4. Use `Pick Targets` to limit the scan to the CIDRs or single IPs you want. All loaded targets start selected by default, and you can use `Select All` / `Deselect All` in the picker. The scan automatically covers all scannable hosts in the selected targets, so there is no separate host-limit field to tune.
 5. Keep port `53` unless you specifically need another DNS port.
 6. Use `UDP` for the normal DNS path, `TCP` if you want TCP-only testing, or `BOTH` if you want the scanner to try UDP first and then TCP.
-7. Set probe URLs that are accessible through your network. These probes are used to judge stable recursive resolution.
-8. If you want DNSTT validation, set `DNSTT Domain`. Leave `DNSTT Pubkey` empty if you only want the tunnel precheck. Set `DNSTT Pubkey` if you want a full end-to-end DNSTT check.
-9. `E2E Port` controls the final `SOCKS5 CONNECT` request used for the DNSTT e2e check. The app uses the scanned resolver IP as the host and this port as the destination.
-10. Leave `Query Size` empty or `0` unless your `dnstt-client` build supports the `-mtu` flag.
-11. Run the scan first, then use `Test DNSTT` to open the dedicated DNSTT screen and start the DNSTT stage there.
-12. Export the results you want to keep. Export filenames are stage-specific:
+7. Set `Recursion Host` to an outside hostname you want to use for the first recursive lookup check.
+8. Set probe hosts that are accessible from the restricted network you care about. These probes are used to judge stable recursive resolution.
+9. If you want DNSTT validation, set `DNSTT Domain`. Leave `DNSTT Pubkey` empty if you only want the tunnel precheck. Set `DNSTT Pubkey` if you want a full end-to-end DNSTT check.
+10. `E2E Port` controls the final `SOCKS5 CONNECT` request used for the DNSTT e2e check. The app uses the scanned resolver IP as the host and this port as the destination.
+11. Leave `Query Size` empty or `0` unless your `dnstt-client` build supports the `-mtu` flag.
+12. Run the scan first, then use `Test DNSTT` to open the dedicated DNSTT screen and start the DNSTT stage there.
+13. Export the results you want to keep. Export filenames are stage-specific:
     `cidr-<label>`, `dns-scan-success-<label>`, `dns-scan-failures-<label>`, and `dnstt-scan-success-<label>`.
 
 Important:
@@ -144,15 +145,16 @@ Important:
 
 1. ابتدا یکی از سه روش `Automatic API Fetch` یا `Import TXT` یا `Paste Targets` را انتخاب کنید. اگر اپراتوری انتخاب نشده باشد، فقط `Import TXT` و `Paste Targets` در دسترس هستند.
 2. اگر از فایل یا paste استفاده می‌کنید، در هر خط فقط یک `IPv4 CIDR` یا `IPv4` تکی قرار دهید. خط خالی و `#` نادیده گرفته می‌شود.
-3. با `Pick Targets` فقط تارگت‌هایی را انتخاب کنید که واقعا می‌خواهید اسکن شوند. به صورت پیش‌فرض همه تارگت‌های لودشده انتخاب می‌شوند و داخل پنجره انتخاب هم گزینه `Select All` و `Deselect All` دارید.
+3. با `Pick Targets` فقط تارگت‌هایی را انتخاب کنید که واقعا می‌خواهید اسکن شوند. به صورت پیش‌فرض همه تارگت‌های لودشده انتخاب می‌شوند و داخل پنجره انتخاب هم گزینه `Select All` و `Deselect All` دارید. برنامه به صورت خودکار همه هاست‌های قابل اسکن داخل همان انتخاب را بررسی می‌کند و دیگر فیلد جداگانه‌ای برای host limit ندارد.
 4. اگر نیاز خاصی ندارید، پورت را روی `53` نگه دارید.
 5. اگر تست معمول DNS می‌خواهید از `UDP` استفاده کنید، اگر فقط TCP می‌خواهید `TCP` را انتخاب کنید، و اگر می‌خواهید اول UDP و بعد TCP امتحان شود از `BOTH` استفاده کنید.
-6. برای Probe آدرس‌هایی را وارد کنید که از داخل شبکه شما واقعا قابل دسترس باشند. این آدرس‌ها برای تشخیص stable recursive resolution استفاده می‌شوند.
-7. اگر تست `DNSTT` می‌خواهید، `DNSTT Domain` را وارد کنید. اگر فقط precheck می‌خواهید، `DNSTT Pubkey` را خالی بگذارید. اگر تست کامل end-to-end می‌خواهید، `DNSTT Pubkey` را هم وارد کنید.
-8. فیلد `E2E Port` مشخص می‌کند برنامه در انتهای تست `SOCKS5 CONNECT` از چه پورتی روی همان resolver در حال تست استفاده کند. مقدار پیش‌فرض `53` است.
-9. فیلد `Query Size` را خالی بگذارید مگر این که مطمئن باشید باینری `dnstt-client` شما از `-mtu` پشتیبانی می‌کند.
-10. اول اسکن را اجرا کنید، بعد `Test DNSTT` را بزنید.
-11. در پایان نتیجه‌ها را خروجی بگیرید.
+6. در فیلد `Recursion Host` فقط نام هاست را بدون `http://` یا `https://` وارد کنید و برای اولین تست recursive lookup از یک هاست بیرون از شبکه محدود استفاده کنید.
+7. برای `Probe Host`ها نام‌هایی را وارد کنید که از داخل شبکه محدود مورد نظر شما واقعا قابل دسترس باشند. این آدرس‌ها برای تشخیص stable recursive resolution استفاده می‌شوند.
+8. اگر تست `DNSTT` می‌خواهید، `DNSTT Domain` را وارد کنید. اگر فقط precheck می‌خواهید، `DNSTT Pubkey` را خالی بگذارید. اگر تست کامل end-to-end می‌خواهید، `DNSTT Pubkey` را هم وارد کنید.
+9. فیلد `E2E Port` مشخص می‌کند برنامه در انتهای تست `SOCKS5 CONNECT` از چه پورتی روی همان resolver در حال تست استفاده کند. مقدار پیش‌فرض `53` است.
+10. فیلد `Query Size` را خالی بگذارید مگر این که مطمئن باشید باینری `dnstt-client` شما از `-mtu` پشتیبانی می‌کند.
+11. اول اسکن را اجرا کنید، بعد `Test DNSTT` را بزنید.
+12. در پایان نتیجه‌ها را خروجی بگیرید.
 
 نکته مهم:
 

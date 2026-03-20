@@ -20,6 +20,8 @@ import (
 	"range-scout/internal/prefixes"
 )
 
+const defaultRecursionDomain = "google.com."
+
 var defaultStabilityDomains = []string{"github.com."}
 
 type Config struct {
@@ -28,6 +30,7 @@ type Config struct {
 	HostLimit        uint64
 	Port             int
 	Protocol         Protocol
+	RecursionDomain  string
 	StabilityDomains []string
 }
 
@@ -96,6 +99,7 @@ func Scan(
 		targetPort = 53
 	}
 	targetProtocol := normalizeProtocol(cfg.Protocol)
+	recursionDomain := configuredRecursionDomain(cfg.RecursionDomain)
 	stabilityDomains := configuredStabilityDomains(cfg.StabilityDomains)
 
 	progressDone := make(chan struct{})
@@ -138,7 +142,7 @@ func Scan(
 		go func() {
 			defer workerWG.Done()
 			for target := range jobs {
-				resolver, ok := probeResolver(ctx, target, cfg.Timeout, targetPort, targetProtocol, stabilityDomains)
+				resolver, ok := probeResolver(ctx, target, cfg.Timeout, targetPort, targetProtocol, recursionDomain, stabilityDomains)
 				scanned.Add(1)
 				if ok {
 					reachable.Add(1)
@@ -222,7 +226,7 @@ func Scan(
 	return result, nil
 }
 
-func probeResolver(ctx context.Context, target scanTarget, timeout time.Duration, port int, protocol Protocol, stabilityDomains []string) (model.Resolver, bool) {
+func probeResolver(ctx context.Context, target scanTarget, timeout time.Duration, port int, protocol Protocol, recursionDomain string, stabilityDomains []string) (model.Resolver, bool) {
 	reachabilityResponse, reachabilityLatency, reachabilityProtocol, ok := probeDNSReachable(ctx, target.IP, timeout, port, protocol)
 	if !ok {
 		return model.Resolver{}, false
@@ -240,7 +244,7 @@ func probeResolver(ctx context.Context, target scanTarget, timeout time.Duration
 		Stable:              false,
 	}
 
-	recursionResponse, recursionLatency, recursionProtocol, recursionOK := probeLookup(ctx, target.IP, timeout, port, protocol, "google.com.", true)
+	recursionResponse, recursionLatency, recursionProtocol, recursionOK := probeLookup(ctx, target.IP, timeout, port, protocol, recursionDomain, true)
 	if recursionResponse != nil {
 		resolver.Transport = string(recursionProtocol)
 		resolver.RecursionAdvertised = recursionResponse.RecursionAvailable
@@ -374,6 +378,14 @@ func configuredStabilityDomains(domains []string) []string {
 		return append([]string(nil), defaultStabilityDomains...)
 	}
 	return append([]string(nil), domains...)
+}
+
+func configuredRecursionDomain(domain string) string {
+	normalized := dns.Fqdn(strings.TrimSpace(domain))
+	if normalized == "." {
+		return defaultRecursionDomain
+	}
+	return normalized
 }
 
 func normalizeProtocol(value Protocol) Protocol {

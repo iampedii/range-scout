@@ -27,7 +27,7 @@ func TestProbeResolverReachableWithoutRecursion(t *testing.T) {
 	resolver, ok := probeResolver(context.Background(), scanTarget{
 		IP:     netip.MustParseAddr("127.0.0.1"),
 		Prefix: "127.0.0.1/32",
-	}, 500*time.Millisecond, port, ProtocolUDP, configuredStabilityDomains(nil))
+	}, 500*time.Millisecond, port, ProtocolUDP, configuredRecursionDomain(""), configuredStabilityDomains(nil))
 	if !ok {
 		t.Fatal("expected dns host to be reachable")
 	}
@@ -76,7 +76,7 @@ func TestProbeResolverMarksStableRecursiveResolvers(t *testing.T) {
 	resolver, ok := probeResolver(context.Background(), scanTarget{
 		IP:     netip.MustParseAddr("127.0.0.1"),
 		Prefix: "127.0.0.1/32",
-	}, 500*time.Millisecond, port, ProtocolUDP, configuredStabilityDomains(nil))
+	}, 500*time.Millisecond, port, ProtocolUDP, configuredRecursionDomain(""), configuredStabilityDomains(nil))
 	if !ok {
 		t.Fatal("expected dns host to be reachable")
 	}
@@ -126,7 +126,7 @@ func TestProbeResolverMarksUnstableRecursiveResolvers(t *testing.T) {
 	resolver, ok := probeResolver(context.Background(), scanTarget{
 		IP:     netip.MustParseAddr("127.0.0.1"),
 		Prefix: "127.0.0.1/32",
-	}, 500*time.Millisecond, port, ProtocolUDP, []string{"github.com.", "example.com."})
+	}, 500*time.Millisecond, port, ProtocolUDP, configuredRecursionDomain(""), []string{"github.com.", "example.com."})
 	if !ok {
 		t.Fatal("expected dns host to be reachable")
 	}
@@ -169,7 +169,7 @@ func TestProbeResolverUsesProvidedStabilityDomainsWithoutFallback(t *testing.T) 
 	resolver, ok := probeResolver(context.Background(), scanTarget{
 		IP:     netip.MustParseAddr("127.0.0.1"),
 		Prefix: "127.0.0.1/32",
-	}, 500*time.Millisecond, port, ProtocolUDP, []string{})
+	}, 500*time.Millisecond, port, ProtocolUDP, configuredRecursionDomain(""), []string{})
 	if !ok {
 		t.Fatal("expected dns host to be reachable")
 	}
@@ -208,10 +208,11 @@ func TestScanTracksReachableAndRecursiveCounts(t *testing.T) {
 	result, err := Scan(context.Background(), model.Operator{Name: "Test"}, []model.PrefixEntry{
 		{Prefix: "127.0.0.1/32", ScanHosts: 1},
 	}, Config{
-		Workers:   1,
-		Timeout:   500 * time.Millisecond,
-		HostLimit: 0,
-		Port:      port,
+		Workers:         1,
+		Timeout:         500 * time.Millisecond,
+		HostLimit:       0,
+		Port:            port,
+		RecursionDomain: "google.com.",
 	}, nil)
 	if err != nil {
 		t.Fatalf("Scan returned error: %v", err)
@@ -269,7 +270,7 @@ func TestProbeResolverSupportsTCP(t *testing.T) {
 	resolver, ok := probeResolver(context.Background(), scanTarget{
 		IP:     netip.MustParseAddr("127.0.0.1"),
 		Prefix: "127.0.0.1/32",
-	}, 500*time.Millisecond, port, ProtocolTCP, configuredStabilityDomains(nil))
+	}, 500*time.Millisecond, port, ProtocolTCP, configuredRecursionDomain(""), configuredStabilityDomains(nil))
 	if !ok {
 		t.Fatal("expected dns host to be reachable over TCP")
 	}
@@ -308,7 +309,7 @@ func TestProbeResolverBothFallsBackToTCP(t *testing.T) {
 	resolver, ok := probeResolver(context.Background(), scanTarget{
 		IP:     netip.MustParseAddr("127.0.0.1"),
 		Prefix: "127.0.0.1/32",
-	}, 500*time.Millisecond, port, ProtocolBoth, configuredStabilityDomains(nil))
+	}, 500*time.Millisecond, port, ProtocolBoth, configuredRecursionDomain(""), configuredStabilityDomains(nil))
 	if !ok {
 		t.Fatal("expected dns host to be reachable when BOTH is selected")
 	}
@@ -379,6 +380,52 @@ func TestNormalizeProbeDomain(t *testing.T) {
 		if got != test.want {
 			t.Fatalf("NormalizeProbeDomain(%q) = %q, want %q", test.input, got, test.want)
 		}
+	}
+}
+
+func TestProbeResolverUsesConfiguredRecursionDomain(t *testing.T) {
+	port, shutdown := startTestDNSServer(t, func(w dns.ResponseWriter, r *dns.Msg) {
+		reply := new(dns.Msg)
+		reply.SetReply(r)
+		if r.RecursionDesired {
+			reply.RecursionAvailable = true
+			if r.Question[0].Name == "resolver-test.example." {
+				reply.Answer = []dns.RR{
+					&dns.A{
+						Hdr: dns.RR_Header{
+							Name:   "resolver-test.example.",
+							Rrtype: dns.TypeA,
+							Class:  dns.ClassINET,
+							Ttl:    300,
+						},
+						A: net.ParseIP("93.184.216.34").To4(),
+					},
+				}
+			} else {
+				reply.Rcode = dns.RcodeNameError
+			}
+		} else {
+			reply.Rcode = dns.RcodeRefused
+		}
+		_ = w.WriteMsg(reply)
+	})
+	defer shutdown()
+
+	resolver, ok := probeResolver(context.Background(), scanTarget{
+		IP:     netip.MustParseAddr("127.0.0.1"),
+		Prefix: "127.0.0.1/32",
+	}, 500*time.Millisecond, port, ProtocolUDP, "resolver-test.example.", []string{})
+	if !ok {
+		t.Fatal("expected dns host to be reachable")
+	}
+	if !resolver.RecursionAvailable {
+		t.Fatal("expected RecursionAvailable to be true for configured recursion domain")
+	}
+}
+
+func TestConfiguredRecursionDomainFallsBackToDefault(t *testing.T) {
+	if got := configuredRecursionDomain(""); got != defaultRecursionDomain {
+		t.Fatalf("configuredRecursionDomain(\"\") = %q, want %q", got, defaultRecursionDomain)
 	}
 }
 
