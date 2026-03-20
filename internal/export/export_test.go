@@ -83,6 +83,11 @@ func TestSaveResolversCSVIncludesTransportAndStableColumns(t *testing.T) {
 				ResponseCode:        "NOERROR",
 				LatencyMillis:       21,
 				Prefix:              "198.51.100.0/24",
+				DNSTTChecked:        true,
+				DNSTTTunnelOK:       true,
+				DNSTTE2EOK:          true,
+				DNSTTTunnelMillis:   41,
+				DNSTTE2EMillis:      285,
 			},
 		},
 	}
@@ -97,11 +102,11 @@ func TestSaveResolversCSVIncludesTransportAndStableColumns(t *testing.T) {
 	}
 
 	text := string(data)
-	if !strings.Contains(text, "operator,ip,transport,dns_reachable,recursion_available,recursion_advertised,stable,response_code,latency_ms,prefix") {
+	if !strings.Contains(text, "operator,ip,transport,dns_reachable,recursion_available,recursion_advertised,stable,response_code,latency_ms,prefix,dnstt_checked,dnstt_tunnel_ok,dnstt_e2e_ok,dnstt_tunnel_ms,dnstt_e2e_ms,dnstt_error") {
 		t.Fatalf("csv header missing transport/stable columns: %s", text)
 	}
-	if !strings.Contains(text, "TIC,198.51.100.10,TCP,true,true,true,true,NOERROR,21,198.51.100.0/24") {
-		t.Fatalf("csv row missing transport/stable value: %s", text)
+	if !strings.Contains(text, "TIC,198.51.100.10,TCP,true,true,true,true,NOERROR,21,198.51.100.0/24,true,true,true,41,285,") {
+		t.Fatalf("csv row missing transport/stable/dnstt value: %s", text)
 	}
 }
 
@@ -131,5 +136,66 @@ func TestSaveResolversJSONOmitsPrefixes(t *testing.T) {
 	}
 	if !strings.Contains(text, "\"resolvers\"") {
 		t.Fatalf("json missing resolvers field: %s", text)
+	}
+}
+
+func TestSaveFailedHostsTXT(t *testing.T) {
+	tempDir := t.TempDir()
+	path := filepath.Join(tempDir, "failed.txt")
+
+	result := FailedHostResult{
+		Operator: model.Operator{Name: "MCI"},
+		FailedHosts: []FailedHost{
+			{IP: "198.51.100.10", Prefix: "198.51.100.0/24"},
+			{IP: "198.51.100.11", Prefix: "198.51.100.0/24"},
+		},
+		TotalTargets:   4,
+		ScannedTargets: 4,
+		FailedCount:    2,
+	}
+
+	if err := SaveFailedHosts(path, FormatTXT, result); err != nil {
+		t.Fatalf("SaveFailedHosts returned error: %v", err)
+	}
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("ReadFile returned error: %v", err)
+	}
+
+	if got := string(data); got != "198.51.100.10\n198.51.100.11\n" {
+		t.Fatalf("unexpected txt output: %q", got)
+	}
+}
+
+func TestSaveFailedHostsCSV(t *testing.T) {
+	tempDir := t.TempDir()
+	path := filepath.Join(tempDir, "failed.csv")
+
+	result := FailedHostResult{
+		Operator: model.Operator{Name: "Irancell"},
+		FailedHosts: []FailedHost{
+			{IP: "198.51.100.10", Prefix: "198.51.100.0/24"},
+		},
+		TotalTargets:   4,
+		ScannedTargets: 4,
+		FailedCount:    1,
+	}
+
+	if err := SaveFailedHosts(path, FormatCSV, result); err != nil {
+		t.Fatalf("SaveFailedHosts returned error: %v", err)
+	}
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("ReadFile returned error: %v", err)
+	}
+
+	text := string(data)
+	if !strings.Contains(text, "operator,ip,prefix") {
+		t.Fatalf("csv header missing: %s", text)
+	}
+	if !strings.Contains(text, "Irancell,198.51.100.10,198.51.100.0/24") {
+		t.Fatalf("csv row missing: %s", text)
 	}
 }

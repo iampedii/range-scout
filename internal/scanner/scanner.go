@@ -77,6 +77,7 @@ func Scan(
 	totalTargets := prefixes.EstimateScanTargets(entries, cfg.HostLimit)
 	result := model.ScanResult{
 		Operator:      operator,
+		Prefixes:      append([]model.PrefixEntry(nil), entries...),
 		TotalTargets:  totalTargets,
 		Workers:       cfg.Workers,
 		TimeoutMillis: int(cfg.Timeout.Milliseconds()),
