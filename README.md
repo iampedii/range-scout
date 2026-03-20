@@ -2,7 +2,9 @@
 
 `range-scout` is a small TUI for:
 
-- fetching announced IPv4 prefixes for supported Iranian operators from RIPEstat
+- loading announced IPv4 prefixes for supported Iranian operators
+- importing IPv4 CIDRs or single IPv4 addresses from a local `.txt` file
+- pasting IPv4 CIDRs or single IPv4 addresses directly into the TUI
 - choosing one or more ranges to scan
 - checking which hosts on that range answer on DNS and allow recursion
 - exporting prefixes or scan results on demand as `txt`, `csv`, or `json`
@@ -13,8 +15,8 @@
 
 ## What It Does
 
-1. Fetches IPv4 prefixes for a selected operator from RIPEstat.
-2. Lets you choose one or more CIDR ranges from that operator.
+1. Loads IPv4 scan targets for a selected operator, from a local `.txt` file, or from pasted text.
+2. Lets you choose one or more CIDR ranges or single IPs from that loaded target set.
 3. Scans hosts in those ranges over UDP, TCP, or both on a configurable port (default `53`).
 4. Marks hosts as:
    - `dns reachable`
@@ -44,14 +46,15 @@ go run .
 ## Quick Guide
 
 1. Select an operator from the left sidebar.
-2. Click `Fetch` to load its prefixes.
-3. Click `Scan Setup`.
-4. Click `Pick Range`, use the filter box if needed, and choose one or more CIDRs.
-5. Set the port, protocol, and probe URLs.
+2. Choose `Automatic API Fetch`, `Import TXT`, or `Paste Targets` in `Load From`.
+3. Click `Load Targets` to load operator prefixes, set `Import File` and click `Import TXT`, or click `Paste Targets` and paste directly into the modal.
+4. Click `Scan Setup`.
+5. Click `Pick Targets`, use the filter box if needed, and choose one or more CIDRs or single IPs.
+6. Set the port, protocol, and probe URLs.
    Choose sites that are reachable in your network.
-6. Click `Start Scan`.
-7. Click `Export` if you want to save scan results.
-8. In prefix mode, click `Save` if you want to save prefixes.
+7. Click `Start Scan`.
+8. Click `Export` if you want to save scan results.
+9. In target mode, click `Save Targets` if you want to save the loaded targets as `txt`.
 
 ## User Guidance
 
@@ -59,8 +62,8 @@ go run .
 
 How it works:
 
-1. The app fetches public IPv4 ranges for the selected operator from RIPEstat.
-2. You choose one or more CIDR ranges that you want to scan.
+1. The app loads public IPv4 ranges for the selected operator, imports IPv4 CIDRs / single IPv4s from a local `.txt` file, or accepts pasted IPv4 CIDRs / single IPv4s.
+2. You choose one or more CIDR ranges or imported / pasted single IPs that you want to scan.
 3. The scanner probes each host in those ranges over `UDP`, `TCP`, or `BOTH` on the port you choose.
 4. If a host answers DNS, the app records it as a candidate IP.
 5. The app then checks whether recursion works and whether the resolver is stable by testing the probe hostnames you set.
@@ -68,12 +71,14 @@ How it works:
 
 What to do:
 
-1. Use `Fetch` first.
-2. Use `Pick Range` to limit the scan to the CIDRs you want.
-3. Keep port `53` unless you specifically need another DNS port.
-4. Use `UDP` for the normal DNS path, `TCP` if you want TCP-only testing, or `BOTH` if you want the scanner to try UDP first and then TCP.
-5. Set probe URLs that are accessible through your network. These probes are used to judge stable recursive resolution.
-6. Run the scan and export the results you want to keep.
+1. Choose `Automatic API Fetch` if you want to load operator prefixes, `Import TXT` if you want to load targets from a file, or `Paste Targets` if you want to paste them directly.
+2. For file import or pasted text, put one IPv4 CIDR or IPv4 address on each line. Empty lines and `#` comments are ignored.
+3. Load the targets first.
+4. Use `Pick Targets` to limit the scan to the CIDRs or single IPs you want.
+5. Keep port `53` unless you specifically need another DNS port.
+6. Use `UDP` for the normal DNS path, `TCP` if you want TCP-only testing, or `BOTH` if you want the scanner to try UDP first and then TCP.
+7. Set probe URLs that are accessible through your network. These probes are used to judge stable recursive resolution.
+8. Run the scan and export the results you want to keep.
 
 Important:
 
@@ -83,9 +88,9 @@ Important:
 
 ## Shortcuts
 
-- `p`: prefix view
+- `p`: target view
 - `d`: scan setup
-- `f`: fetch prefixes
+- `f`: load from the selected source
 - `s`: save or export current data
 - `g`: start scan
 - `x`: stop scan

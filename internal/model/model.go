@@ -24,6 +24,7 @@ type LookupResult struct {
 	Warnings       []string      `json:"warnings,omitempty"`
 	SourceLabel    string        `json:"source_label"`
 	SourceURL      string        `json:"source_url"`
+	SourcePath     string        `json:"source_path,omitempty"`
 }
 
 type Resolver struct {

@@ -16,7 +16,7 @@ import (
 
 const (
 	defaultBaseURL = "https://stat.ripe.net/data/announced-prefixes/data.json"
-	defaultSource  = "RIPEstat announced-prefixes"
+	defaultSource  = "Automatic API Fetch"
 )
 
 type Client struct {

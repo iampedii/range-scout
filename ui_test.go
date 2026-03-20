@@ -86,15 +86,22 @@ func TestRebuildFormUpdatesPathForSelectedOperator(t *testing.T) {
 	u := newUI()
 	u.mode = screenOperators
 	u.selected = 1
+	operator := u.selectedOperator()
+	u.lookupCache[operator.Key] = model.LookupResult{
+		Operator: operator,
+		Entries: []model.PrefixEntry{
+			{Prefix: "198.51.100.0/24"},
+		},
+	}
 	u.updateDefaultPaths()
 	u.rebuildForm()
 
-	field, ok := u.form.GetFormItem(1).(*tview.InputField)
+	field, ok := u.form.GetFormItem(2).(*tview.InputField)
 	if !ok {
-		t.Fatalf("expected path form item to be an input field, got %T", u.form.GetFormItem(1))
+		t.Fatalf("expected path form item to be an input field, got %T", u.form.GetFormItem(2))
 	}
 
-	pattern := regexp.MustCompile(`^exports/irancell_prefixes_\d{8}_\d{6}_\d{6}\.csv$`)
+	pattern := regexp.MustCompile(`^exports/irancell_prefixes_\d{8}_\d{6}_\d{6}\.txt$`)
 	if got := field.GetText(); !pattern.MatchString(got) {
 		t.Fatalf("unexpected path field text: %q", got)
 	}
@@ -137,7 +144,7 @@ func TestSelectedScanEntriesUsesMultipleChosenRanges(t *testing.T) {
 	if entries[0].Prefix != "198.51.100.0/24" || entries[1].Prefix != "198.51.101.0/24" {
 		t.Fatalf("unexpected selected prefixes: %#v", entries)
 	}
-	if got := u.selectedScanSummary(operator.Key); got != "2 ranges selected" {
+	if got := u.selectedScanSummary(operator.Key); got != "2 targets selected" {
 		t.Fatalf("unexpected scan summary: %s", got)
 	}
 }
@@ -227,6 +234,9 @@ func TestScannerFormHidesPrefixActionsAndShowsBack(t *testing.T) {
 	}
 	if !u.hasButton("Start Scan") {
 		t.Fatal("expected scanner form to show Start Scan button")
+	}
+	if !u.hasButton("Pick Targets") {
+		t.Fatal("expected scanner form to show Pick Targets button")
 	}
 }
 
@@ -376,10 +386,106 @@ func TestFilterPrefixEntryIndexes(t *testing.T) {
 func TestScanRangeLabelShowsHighlight(t *testing.T) {
 	entry := model.PrefixEntry{Prefix: "198.51.100.0/24", TotalAddresses: 256}
 
-	if got := scanRangeLabel(entry, false); got != "         256 IPs  198.51.100.0/24" {
+	if got := scanRangeLabel(entry, false, false); got != "         256 IPs  198.51.100.0/24" {
 		t.Fatalf("unexpected plain label: %q", got)
 	}
-	if got := scanRangeLabel(entry, true); got != "[black:lightskyblue]         256 IPs  198.51.100.0/24[-:-:-]" {
+	if got := scanRangeLabel(entry, false, true); got != "[black:lightskyblue]         256 IPs  198.51.100.0/24[-:-:-]" {
 		t.Fatalf("unexpected highlighted label: %q", got)
+	}
+}
+
+func TestOperatorFormShowsImportControlsForTXTSource(t *testing.T) {
+	u := newUI()
+	operator := u.selectedOperator()
+	u.setSelectedTargetSource(operator.Key, targetSourceImportTXT)
+	u.rebuildForm()
+
+	sourceField, ok := u.form.GetFormItem(0).(*tview.DropDown)
+	if !ok || sourceField == nil {
+		t.Fatalf("expected source dropdown at form item 0, got %T", u.form.GetFormItem(0))
+	}
+	pathField, ok := u.form.GetFormItem(1).(*tview.InputField)
+	if !ok {
+		t.Fatalf("expected import file field at form item 1, got %T", u.form.GetFormItem(1))
+	}
+	if !strings.Contains(pathField.GetLabel(), "Import File") {
+		t.Fatalf("expected Import File label, got %q", pathField.GetLabel())
+	}
+	if !u.hasButton("Import TXT") {
+		t.Fatal("expected Import TXT button for TXT source")
+	}
+	if u.hasButton("Save Targets") {
+		t.Fatal("expected Save Targets to stay hidden before any targets are loaded")
+	}
+}
+
+func TestOperatorFormShowsPasteControlsForPasteSource(t *testing.T) {
+	u := newUI()
+	operator := u.selectedOperator()
+	u.setSelectedTargetSource(operator.Key, targetSourcePaste)
+	u.setPasteBuffer(operator.Key, "198.51.100.10\n198.51.100.0/24\n")
+	u.rebuildForm()
+
+	statusField, ok := u.form.GetFormItem(1).(*tview.InputField)
+	if !ok {
+		t.Fatalf("expected paste status field at form item 1, got %T", u.form.GetFormItem(1))
+	}
+	if got := statusField.GetText(); got != "2 lines ready" {
+		t.Fatalf("unexpected paste status text: %q", got)
+	}
+	if !u.hasButton("Paste Targets") {
+		t.Fatal("expected Paste Targets button for paste source")
+	}
+	if u.hasButton("Save Targets") {
+		t.Fatal("expected Save Targets to stay hidden before any pasted targets are applied")
+	}
+}
+
+func TestSelectedScanSummaryUsesRawSingleIPForImportedTargets(t *testing.T) {
+	u := newUI()
+	operator := u.selectedOperator()
+	u.lookupCache[operator.Key] = model.LookupResult{
+		Operator:    operator,
+		SourceLabel: string(targetSourceImportTXT),
+		SourcePath:  "/tmp/targets.txt",
+		Entries: []model.PrefixEntry{
+			{Prefix: "198.51.100.10/32", TotalAddresses: 1, ScanHosts: 1},
+		},
+	}
+
+	u.ensureScanRangeSelection(operator.Key)
+
+	if got := u.selectedScanSummary(operator.Key); got != "198.51.100.10" {
+		t.Fatalf("unexpected imported single-IP summary: %q", got)
+	}
+}
+
+func TestSelectedScanSummaryUsesRawSingleIPForPastedTargets(t *testing.T) {
+	u := newUI()
+	operator := u.selectedOperator()
+	u.lookupCache[operator.Key] = model.LookupResult{
+		Operator:    operator,
+		SourceLabel: string(targetSourcePaste),
+		Entries: []model.PrefixEntry{
+			{Prefix: "198.51.100.20/32", TotalAddresses: 1, ScanHosts: 1},
+		},
+	}
+
+	u.ensureScanRangeSelection(operator.Key)
+
+	if got := u.selectedScanSummary(operator.Key); got != "198.51.100.20" {
+		t.Fatalf("unexpected pasted single-IP summary: %q", got)
+	}
+}
+
+func TestLoadTargetsOpensPasteModalForPasteSource(t *testing.T) {
+	u := newUI()
+	operator := u.selectedOperator()
+	u.setSelectedTargetSource(operator.Key, targetSourcePaste)
+
+	u.loadTargets()
+
+	if !u.pages.HasPage("paste-targets") {
+		t.Fatal("expected loadTargets to open the paste modal for paste source")
 	}
 }

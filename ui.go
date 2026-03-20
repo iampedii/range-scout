@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/netip"
+	"os"
 	"slices"
 	"strconv"
 	"strings"
@@ -23,6 +25,7 @@ import (
 type screen string
 
 type scanSaveScope string
+type targetSourceMode string
 
 const (
 	screenOperators screen = "operators"
@@ -30,6 +33,10 @@ const (
 
 	scanSaveRecursiveOnly scanSaveScope = "recursive only"
 	scanSaveAllDNSHosts   scanSaveScope = "all dns hosts"
+
+	targetSourceRIPE      targetSourceMode = "Automatic API Fetch"
+	targetSourceImportTXT targetSourceMode = "Import TXT"
+	targetSourcePaste     targetSourceMode = "Paste Targets"
 )
 
 type scanProgress struct {
@@ -65,12 +72,14 @@ type ui struct {
 	liveResolvers      []model.Resolver
 	scanCancel         context.CancelFunc
 
-	prefixFormat        string
 	prefixPath          string
 	scanFormat          string
 	scanPath            string
 	scanSaveScope       scanSaveScope
 	scanRanges          map[string][]string
+	targetSources       map[string]targetSourceMode
+	importPaths         map[string]string
+	pasteBuffers        map[string]string
 	prefixSuggestedPath string
 	scanSuggestedPath   string
 	scanWorkers         string
@@ -102,10 +111,12 @@ func newUI() *ui {
 		client:        ripestat.NewClient(),
 		lookupCache:   make(map[string]model.LookupResult),
 		scanCache:     make(map[string]model.ScanResult),
-		prefixFormat:  export.FormatCSV.String(),
 		scanFormat:    export.FormatTXT.String(),
 		scanSaveScope: scanSaveRecursiveOnly,
 		scanRanges:    make(map[string][]string),
+		targetSources: make(map[string]targetSourceMode),
+		importPaths:   make(map[string]string),
+		pasteBuffers:  make(map[string]string),
 		scanWorkers:   "256",
 		scanTimeoutMS: "1200",
 		scanHostLimit: "50000",
@@ -121,7 +132,7 @@ func newUI() *ui {
 	u.rebuildForm()
 	u.addActivity("Ready")
 	u.renderAll()
-	u.setStatus("Ready. Select an operator and press Enter to fetch prefixes.")
+	u.setStatus("Ready. Select an operator and press Enter to load targets.")
 
 	rightColumn := tview.NewFlex().SetDirection(tview.FlexRow).
 		AddItem(u.commands, 0, 1, false).
@@ -142,6 +153,7 @@ func newUI() *ui {
 	u.app.SetFocus(u.operatorList)
 	u.app.SetInputCapture(u.handleKeys)
 	u.app.EnableMouse(true)
+	u.app.EnablePaste(true)
 
 	return u
 }
@@ -176,13 +188,13 @@ func (u *ui) configureViews() {
 	})
 	u.operatorList.SetSelectedFunc(func(index int, mainText, secondaryText string, shortcut rune) {
 		if u.scanRunning() {
-			u.setStatus("Scan running. Stop it before fetching or switching.")
-			u.addActivity("Fetch blocked: scan active")
+			u.setStatus("Scan running. Stop it before loading or switching.")
+			u.addActivity("Load blocked: scan active")
 			u.restoreSelectedOperator()
 			return
 		}
 		u.selected = index
-		u.fetchPrefixes()
+		u.loadTargets()
 	})
 
 	u.details.
@@ -219,7 +231,7 @@ func (u *ui) populateOperators() {
 }
 
 func (u *ui) handleKeys(event *tcell.EventKey) *tcell.EventKey {
-	if u.pages.HasPage("range-picker") {
+	if u.pages.HasPage("range-picker") || u.pages.HasPage("paste-targets") || u.pages.HasPage("confirm-exit") {
 		return event
 	}
 
@@ -277,7 +289,7 @@ func (u *ui) handleKeys(event *tcell.EventKey) *tcell.EventKey {
 		u.openScanner()
 		return nil
 	case event.Rune() == 'f':
-		u.fetchPrefixes()
+		u.loadTargets()
 		return nil
 	case event.Rune() == 's':
 		if u.mode == screenOperators {
@@ -374,27 +386,41 @@ func (u *ui) rebuildForm() {
 
 	switch u.mode {
 	case screenOperators:
-		u.form.SetTitle("Commands - Prefixes")
-		u.form.AddFormItem(u.newFormatDropDown("Format", u.prefixFormat, func(value string) {
-			u.prefixFormat = value
+		operator := u.selectedOperator()
+		sourceMode := u.selectedTargetSource(operator.Key)
+		u.form.SetTitle("Commands - Targets")
+		u.form.AddFormItem(u.newTargetSourceDropDown("Load From", sourceMode, func(value targetSourceMode) {
+			u.setSelectedTargetSource(operator.Key, value)
 			u.updateDefaultPaths()
 			u.rebuildForm()
 			u.renderAll()
 		}))
-		u.form.AddFormItem(u.newInput("Path", u.prefixPath, func(value string) { u.prefixPath = value }))
-		u.addButtonRow(0,
-			buttonSpec{label: "Fetch", action: u.fetchPrefixes},
-			buttonSpec{label: "Save", action: u.savePrefixes},
-		)
+		if sourceMode == targetSourceImportTXT {
+			u.form.AddFormItem(u.newInput("Import File", u.importPath(operator.Key), func(value string) {
+				u.setImportPath(operator.Key, value)
+			}))
+			u.form.AddFormItem(u.newReadOnlyInput("Import Note", "TXT only. One IPv4 CIDR or single IPv4 per line. # comments ignored"))
+		} else if sourceMode == targetSourcePaste {
+			u.form.AddFormItem(u.newReadOnlyInput("Paste Status", u.pasteStatus(operator.Key)))
+			u.form.AddFormItem(u.newReadOnlyInput("Paste Note", "Open Paste Targets to paste one IPv4 CIDR or IPv4 address per line"))
+		}
+		if sourceMode == targetSourcePaste {
+			u.addButtonRow(0, buttonSpec{label: "Paste Targets", action: u.openPasteTargetsModal})
+		} else {
+			u.addButtonRow(0, buttonSpec{label: primaryLoadButtonLabel(sourceMode), action: u.loadTargets})
+		}
 		if u.hasFetchedPrefixes(u.selectedOperator().Key) {
+			u.form.AddFormItem(u.newReadOnlyInput("Save As", export.FormatTXT.String()))
+			u.form.AddFormItem(u.newInput("Save To", u.prefixPath, func(value string) { u.prefixPath = value }))
 			u.addButtonRow(1,
+				buttonSpec{label: "Save Targets", action: u.savePrefixes},
 				buttonSpec{label: "Scan Setup", action: u.openScanner},
 			)
 		}
 	case screenScanner:
 		u.form.SetTitle("Commands - DNS Scan")
 		u.ensureScanRangeSelection(u.selectedOperator().Key)
-		u.form.AddFormItem(u.newReadOnlyInput("Ranges", u.selectedScanSummary(u.selectedOperator().Key)))
+		u.form.AddFormItem(u.newReadOnlyInput("Targets", u.selectedScanSummary(u.selectedOperator().Key)))
 		u.form.AddFormItem(u.newInput("Workers", u.scanWorkers, func(value string) { u.scanWorkers = value }))
 		u.form.AddFormItem(u.newInput("Timeout", u.scanTimeoutMS, func(value string) { u.scanTimeoutMS = value }))
 		u.form.AddFormItem(u.newInput("Host Limit", u.scanHostLimit, func(value string) { u.scanHostLimit = value }))
@@ -417,7 +443,7 @@ func (u *ui) rebuildForm() {
 		}))
 		u.form.AddFormItem(u.newInput("Path", u.scanPath, func(value string) { u.scanPath = value }))
 		u.addButtonRow(0,
-			buttonSpec{label: "Pick Range", action: u.openRangePicker},
+			buttonSpec{label: "Pick Targets", action: u.openRangePicker},
 			buttonSpec{label: "Start Scan", action: u.startScan},
 		)
 		u.addButtonRow(1,
@@ -514,6 +540,25 @@ func (u *ui) newFormatDropDown(label, selected string, onChange func(string)) *t
 	return dropdown
 }
 
+func (u *ui) newTargetSourceDropDown(label string, selected targetSourceMode, onChange func(targetSourceMode)) *tview.DropDown {
+	options := []string{string(targetSourceRIPE), string(targetSourceImportTXT), string(targetSourcePaste)}
+	currentIndex := 0
+	for i, option := range options {
+		if option == string(selected) {
+			currentIndex = i
+			break
+		}
+	}
+	dropdown := tview.NewDropDown().SetLabel(label+": ").SetOptions(options, nil)
+	dropdown.SetCurrentOption(currentIndex)
+	dropdown.SetSelectedFunc(func(text string, index int) {
+		if text != "" {
+			onChange(targetSourceMode(text))
+		}
+	})
+	return dropdown
+}
+
 func (u *ui) newScanSaveScopeDropDown(label string, selected scanSaveScope, onChange func(scanSaveScope)) *tview.DropDown {
 	options := []string{string(scanSaveRecursiveOnly), string(scanSaveAllDNSHosts)}
 	currentIndex := 0
@@ -561,13 +606,13 @@ func (u *ui) renderAll() {
 
 func (u *ui) renderHeader() {
 	operator := u.selectedOperator()
-	modeLabel := "Prefixes"
+	modeLabel := "Targets"
 	if u.mode == screenScanner {
 		modeLabel = "DNS Scan"
 	}
 
 	line1 := fmt.Sprintf("[yellow]%s[-]  [cyan]%s[-]", operator.Name, modeLabel)
-	line2 := "p prefixes  d dns  f fetch  s save  g start  x stop  q exit"
+	line2 := "p targets  d dns  f load  s save  g start  x stop  q exit"
 	if u.scanRunning() {
 		line2 = "scan active: stop or quit only"
 	}
@@ -577,8 +622,8 @@ func (u *ui) renderHeader() {
 func (u *ui) openScanner() {
 	operator := u.selectedOperator()
 	if !u.hasFetchedPrefixes(operator.Key) {
-		u.setStatus("Fetch prefixes before opening the scanner.")
-		u.addActivity(fmt.Sprintf("Scan view blocked for %s: fetch prefixes first", operator.Name))
+		u.setStatus("Load targets before opening the scanner.")
+		u.addActivity(fmt.Sprintf("Scan view blocked for %s: load targets first", operator.Name))
 		return
 	}
 	u.mode = screenScanner
@@ -601,10 +646,11 @@ func (u *ui) openRangePicker() {
 	operator := u.selectedOperator()
 	lookup, ok := u.lookupCache[operator.Key]
 	if !ok || len(lookup.Entries) == 0 {
-		u.setStatus("Fetch prefixes before choosing a scan range.")
-		u.addActivity(fmt.Sprintf("Range picker blocked for %s: fetch prefixes first", operator.Name))
+		u.setStatus("Load targets before choosing scan targets.")
+		u.addActivity(fmt.Sprintf("Target picker blocked for %s: load targets first", operator.Name))
 		return
 	}
+	customTargets := lookupUsesCustomTargets(lookup)
 
 	u.ensureScanRangeSelection(operator.Key)
 	selected := make(map[string]bool, len(u.scanRanges[operator.Key]))
@@ -615,12 +661,12 @@ func (u *ui) openRangePicker() {
 	search := tview.NewInputField().
 		SetLabel("Filter: ").
 		SetText("").
-		SetPlaceholder("CIDR, slash, or IP fragment")
+		SetPlaceholder("CIDR, IP, slash, or fragment")
 	search.SetPlaceholderTextColor(tcell.ColorGray)
 	list := tview.NewList()
 	list.ShowSecondaryText(false)
 	list.SetBorder(true)
-	list.SetTitle("Pick Scan Ranges")
+	list.SetTitle("Pick Scan Targets")
 	list.SetWrapAround(false)
 
 	visibleIndices := make([]int, 0, len(lookup.Entries))
@@ -631,14 +677,14 @@ func (u *ui) openRangePicker() {
 		currentIndex = 0
 		for _, index := range filterPrefixEntryIndexes(lookup.Entries, query) {
 			entry := lookup.Entries[index]
-			list.AddItem(scanRangeLabel(entry, selected[entry.Prefix]), "", 0, nil)
+			list.AddItem(scanRangeLabel(entry, customTargets, selected[entry.Prefix]), "", 0, nil)
 			if entry.Prefix == keepPrefix {
 				currentIndex = len(visibleIndices)
 			}
 			visibleIndices = append(visibleIndices, index)
 		}
 		if len(visibleIndices) == 0 {
-			list.AddItem("No matching ranges", "", 0, nil)
+			list.AddItem("No matching targets", "", 0, nil)
 			currentIndex = 0
 		}
 		list.SetCurrentItem(currentIndex)
@@ -651,7 +697,7 @@ func (u *ui) openRangePicker() {
 		entry := lookup.Entries[visibleIndices[listIndex]]
 		if selected[entry.Prefix] {
 			if len(selected) == 1 {
-				u.setStatus("At least one range must stay selected.")
+				u.setStatus("At least one target must stay selected.")
 				return
 			}
 			delete(selected, entry.Prefix)
@@ -729,7 +775,7 @@ func (u *ui) openRangePicker() {
 			chosen = append(chosen, lookup.Entries[0].Prefix)
 		}
 		u.scanRanges[operator.Key] = chosen
-		u.addActivity(fmt.Sprintf("Selected %d ranges for %s", len(chosen), operator.Name))
+		u.addActivity(fmt.Sprintf("Selected %d targets for %s", len(chosen), operator.Name))
 		closePicker()
 		u.rebuildForm()
 		u.renderAll()
@@ -772,11 +818,14 @@ func (u *ui) renderDetails() {
 
 	switch u.mode {
 	case screenOperators:
-		u.details.SetTitle("Prefix Details")
+		u.details.SetTitle("Target Details")
 		if result, ok := u.lookupCache[operator.Key]; ok {
-			fmt.Fprintf(&builder, "Fetched: %s\n", result.FetchedAt.Format("2006-01-02 15:04:05"))
+			fmt.Fprintf(&builder, "Loaded: %s\n", result.FetchedAt.Format("2006-01-02 15:04:05"))
 			fmt.Fprintf(&builder, "Source: %s\n", result.SourceLabel)
-			fmt.Fprintf(&builder, "Prefixes: %s  Addresses: %s  Scan Hosts: %s\n\n",
+			if result.SourcePath != "" {
+				fmt.Fprintf(&builder, "File: %s\n", result.SourcePath)
+			}
+			fmt.Fprintf(&builder, "Targets: %s  Addresses: %s  Scan Hosts: %s\n\n",
 				formatCount(uint64(len(result.Entries))),
 				formatCount(result.TotalAddresses),
 				formatCount(result.TotalScanHosts),
@@ -788,19 +837,40 @@ func (u *ui) renderDetails() {
 				}
 				builder.WriteString("\n")
 			}
-			builder.WriteString("Prefixes\n")
-			for index, entry := range result.Entries {
-				fmt.Fprintf(&builder, "%02d  %-18s  %-22s  %10s addr  %10s scan\n",
-					index+1,
-					entry.Prefix,
-					prefixes.CompactASNLabel(entry.SourceASNs),
-					formatCount(entry.TotalAddresses),
-					formatCount(entry.ScanHosts),
-				)
+			if lookupUsesCustomTargets(result) {
+				builder.WriteString("Loaded Targets\n")
+				for index, entry := range result.Entries {
+					fmt.Fprintf(&builder, "%02d  %-18s  %10s addr  %10s scan\n",
+						index+1,
+						displayTargetEntry(entry, true),
+						formatCount(entry.TotalAddresses),
+						formatCount(entry.ScanHosts),
+					)
+				}
+			} else {
+				builder.WriteString("Prefixes\n")
+				for index, entry := range result.Entries {
+					fmt.Fprintf(&builder, "%02d  %-18s  %-22s  %10s addr  %10s scan\n",
+						index+1,
+						entry.Prefix,
+						prefixes.CompactASNLabel(entry.SourceASNs),
+						formatCount(entry.TotalAddresses),
+						formatCount(entry.ScanHosts),
+					)
+				}
 			}
 		} else {
-			builder.WriteString("No prefix data loaded yet.\n")
-			builder.WriteString("Press Enter on the selected operator, use the Fetch button, or press 'f'.\n")
+			switch u.selectedTargetSource(operator.Key) {
+			case targetSourceImportTXT:
+				builder.WriteString("No imported targets loaded yet.\n")
+				builder.WriteString("Set Import File to a .txt file with one IPv4 CIDR or IPv4 address per line, then press Enter, use Import TXT, or press 'f'.\n")
+			case targetSourcePaste:
+				builder.WriteString("No pasted targets loaded yet.\n")
+				builder.WriteString("Open Paste Targets and paste one IPv4 CIDR or IPv4 address per line.\n")
+			default:
+				builder.WriteString("No target data loaded yet.\n")
+				builder.WriteString("Press Enter on the selected operator, use Load Targets, or press 'f'.\n")
+			}
 		}
 	case screenScanner:
 		u.details.SetTitle("DNS Scan Details")
@@ -808,11 +878,19 @@ func (u *ui) renderDetails() {
 		stableCount := countStableResolvers(resolvers)
 		_, hasCachedResult := u.scanCache[operator.Key]
 		activeScanForCurrentOperator := u.activeScanOperator == operator.Key && u.scanCancel != nil
-		fmt.Fprintf(&builder, "Selected ranges: %s\n", u.selectedScanSummary(operator.Key))
+		lookup, lookupLoaded := u.lookupCache[operator.Key]
+		customTargets := lookupLoaded && lookupUsesCustomTargets(lookup)
+		if lookupLoaded {
+			fmt.Fprintf(&builder, "Source: %s\n", lookup.SourceLabel)
+			if lookup.SourcePath != "" {
+				fmt.Fprintf(&builder, "File: %s\n", lookup.SourcePath)
+			}
+		}
+		fmt.Fprintf(&builder, "Selected targets: %s\n", u.selectedScanSummary(operator.Key))
 		if entries, err := u.selectedScanEntries(operator.Key); err == nil && len(entries) > 0 {
 			fmt.Fprintf(&builder, "Selected IPs: %s\n", formatCount(totalPrefixAddresses(entries)))
 			for _, entry := range entries {
-				fmt.Fprintf(&builder, "  - %s (%s IPs)\n", entry.Prefix, formatCount(entry.TotalAddresses))
+				fmt.Fprintf(&builder, "  - %s (%s)\n", displayTargetEntry(entry, customTargets), targetCountLabel(entry.TotalAddresses))
 			}
 		}
 		fmt.Fprintf(&builder, "Protocol: %s  Port: %s\n", displayScanProtocol(u.scanProtocol), displayScanPort(u.scanPort))
@@ -865,7 +943,7 @@ func (u *ui) renderDetails() {
 				builder.WriteString("No DNS services reached yet for this run.\n")
 			} else {
 				builder.WriteString("No DNS services reached yet.\n")
-				builder.WriteString("Fetch prefixes, then start a scan with the form or press 'g'.\n")
+				builder.WriteString("Load targets, then start a scan with the form or press 'g'.\n")
 			}
 		} else {
 			builder.WriteString("DNS Hosts\n")
@@ -908,14 +986,25 @@ func (u *ui) currentScanState(operatorKey string) (scanProgress, []model.Resolve
 	return scanProgress{}, nil
 }
 
+func (u *ui) loadTargets() {
+	switch u.selectedTargetSource(u.selectedOperator().Key) {
+	case targetSourceImportTXT:
+		u.importTargets()
+	case targetSourcePaste:
+		u.openPasteTargetsModal()
+	default:
+		u.fetchPrefixes()
+	}
+}
+
 func (u *ui) fetchPrefixes() {
 	if u.scanRunning() {
-		u.blockDuringScan("Fetch blocked while a scan is running.")
+		u.blockDuringScan("Load blocked while a scan is running.")
 		return
 	}
 	operator := u.selectedOperator()
-	u.setStatus(fmt.Sprintf("Fetching prefixes for %s...", operator.Name))
-	u.addActivity(fmt.Sprintf("Fetch started for %s", operator.Name))
+	u.setStatus(fmt.Sprintf("Loading operator targets for %s...", operator.Name))
+	u.addActivity(fmt.Sprintf("Load started for %s", operator.Name))
 	u.rebuildForm()
 	u.renderAll()
 
@@ -924,17 +1013,18 @@ func (u *ui) fetchPrefixes() {
 		u.app.QueueUpdateDraw(func() {
 			if len(result.Entries) > 0 {
 				u.lookupCache[op.Key] = result
+				delete(u.scanCache, op.Key)
 				u.ensureScanRangeSelection(op.Key)
 			}
 			if err != nil && len(result.Entries) == 0 {
-				u.setStatus(fmt.Sprintf("Lookup failed for %s: %v", op.Name, err))
-				u.addActivity(fmt.Sprintf("Fetch failed for %s", op.Name))
+				u.setStatus(fmt.Sprintf("Load failed for %s: %v", op.Name, err))
+				u.addActivity(fmt.Sprintf("Load failed for %s", op.Name))
 			} else if err != nil {
-				u.setStatus(fmt.Sprintf("Loaded prefixes for %s with warnings. Use Save to export them.", op.Name))
-				u.addActivity(fmt.Sprintf("Fetched %s prefixes for %s with warnings", formatCount(uint64(len(result.Entries))), op.Name))
+				u.setStatus(fmt.Sprintf("Loaded %s targets for %s with warnings. Use Save Targets to export them.", formatCount(uint64(len(result.Entries))), op.Name))
+				u.addActivity(fmt.Sprintf("Loaded %s targets for %s with warnings", formatCount(uint64(len(result.Entries))), op.Name))
 			} else {
-				u.setStatus(fmt.Sprintf("Loaded %s prefixes for %s. Use Save to export them.", formatCount(uint64(len(result.Entries))), op.Name))
-				u.addActivity(fmt.Sprintf("Fetched %s prefixes for %s", formatCount(uint64(len(result.Entries))), op.Name))
+				u.setStatus(fmt.Sprintf("Loaded %s targets for %s. Use Save Targets to export them.", formatCount(uint64(len(result.Entries))), op.Name))
+				u.addActivity(fmt.Sprintf("Loaded %s targets for %s", formatCount(uint64(len(result.Entries))), op.Name))
 			}
 			u.rebuildForm()
 			u.renderAll()
@@ -942,9 +1032,182 @@ func (u *ui) fetchPrefixes() {
 	}(operator)
 }
 
+func (u *ui) importTargets() {
+	if u.scanRunning() {
+		u.blockDuringScan("Import blocked while a scan is running.")
+		return
+	}
+	operator := u.selectedOperator()
+	importPath := strings.TrimSpace(u.importPath(operator.Key))
+	if importPath == "" {
+		u.setStatus("TXT path is empty. Choose a file with IPv4 CIDRs or IPv4 addresses.")
+		u.addActivity(fmt.Sprintf("Import skipped for %s: empty TXT path", operator.Name))
+		return
+	}
+
+	u.setStatus(fmt.Sprintf("Importing targets for %s...", operator.Name))
+	u.addActivity(fmt.Sprintf("Import started for %s from %s", operator.Name, importPath))
+	u.rebuildForm()
+	u.renderAll()
+
+	go func(op model.Operator, path string) {
+		data, err := os.ReadFile(path)
+		result := model.LookupResult{}
+		if err == nil {
+			result, err = parseCustomTargets(op, string(targetSourceImportTXT), path, string(data))
+		}
+
+		u.app.QueueUpdateDraw(func() {
+			if len(result.Entries) > 0 {
+				u.lookupCache[op.Key] = result
+				delete(u.scanCache, op.Key)
+				u.ensureScanRangeSelection(op.Key)
+			}
+			if err != nil && len(result.Entries) == 0 {
+				u.setStatus(fmt.Sprintf("Import failed for %s: %v", op.Name, err))
+				u.addActivity(fmt.Sprintf("Import failed for %s", op.Name))
+			} else if len(result.Warnings) > 0 {
+				u.setStatus(fmt.Sprintf("Imported %s targets for %s with warnings. Use Save Targets to export them.", formatCount(uint64(len(result.Entries))), op.Name))
+				u.addActivity(fmt.Sprintf("Imported %s targets for %s with warnings", formatCount(uint64(len(result.Entries))), op.Name))
+			} else {
+				u.setStatus(fmt.Sprintf("Imported %s targets for %s. Use Save Targets to export them.", formatCount(uint64(len(result.Entries))), op.Name))
+				u.addActivity(fmt.Sprintf("Imported %s targets for %s", formatCount(uint64(len(result.Entries))), op.Name))
+			}
+			u.rebuildForm()
+			u.renderAll()
+		})
+	}(operator, importPath)
+}
+
+func (u *ui) openPasteTargetsModal() {
+	if u.scanRunning() {
+		u.blockDuringScan("Paste blocked while a scan is running.")
+		return
+	}
+
+	operator := u.selectedOperator()
+	textArea := tview.NewTextArea().
+		SetWrap(false).
+		SetPlaceholder("198.51.100.0/24\n198.51.100.10\n# comments supported")
+	textArea.SetBorder(true).SetTitle("Paste Targets")
+	textArea.SetText(u.pasteBuffer(operator.Key), true)
+
+	help := tview.NewTextView().
+		SetDynamicColors(true).
+		SetWrap(true)
+	updateHelp := func(message string) {
+		if strings.TrimSpace(message) != "" {
+			help.SetText(message)
+			return
+		}
+		status := u.pasteStatusFromText(textArea.GetText())
+		if status == "No pasted targets yet" {
+			help.SetText("Paste one IPv4 CIDR or IPv4 address per line. Empty lines and # comments are ignored. Ctrl-V works.")
+			return
+		}
+		help.SetText(fmt.Sprintf(
+			"Paste one IPv4 CIDR or IPv4 address per line. Empty lines and # comments are ignored. %s. Ctrl-V works.",
+			status,
+		))
+	}
+	textArea.SetChangedFunc(func() {
+		updateHelp("")
+	})
+	updateHelp("")
+
+	closeModal := func() {
+		u.pages.RemovePage("paste-targets")
+		u.app.SetFocus(u.form)
+	}
+
+	applyPaste := func() {
+		result, err := parseCustomTargets(operator, string(targetSourcePaste), "", textArea.GetText())
+		if err != nil {
+			updateHelp(fmt.Sprintf("[red]%v[-]", err))
+			return
+		}
+
+		u.setPasteBuffer(operator.Key, textArea.GetText())
+		u.lookupCache[operator.Key] = result
+		delete(u.scanCache, operator.Key)
+		u.ensureScanRangeSelection(operator.Key)
+
+		if len(result.Warnings) > 0 {
+			u.setStatus(fmt.Sprintf("Pasted %s targets for %s with warnings. Use Save Targets to export them.", formatCount(uint64(len(result.Entries))), operator.Name))
+			u.addActivity(fmt.Sprintf("Pasted %s targets for %s with warnings", formatCount(uint64(len(result.Entries))), operator.Name))
+		} else {
+			u.setStatus(fmt.Sprintf("Pasted %s targets for %s. Use Save Targets to export them.", formatCount(uint64(len(result.Entries))), operator.Name))
+			u.addActivity(fmt.Sprintf("Pasted %s targets for %s", formatCount(uint64(len(result.Entries))), operator.Name))
+		}
+
+		closeModal()
+		u.rebuildForm()
+		u.renderAll()
+	}
+
+	var actions *tview.Form
+	textArea.SetInputCapture(func(event *tcell.EventKey) *tcell.EventKey {
+		switch event.Key() {
+		case tcell.KeyEsc:
+			closeModal()
+			u.renderAll()
+			return nil
+		case tcell.KeyCtrlS:
+			applyPaste()
+			return nil
+		case tcell.KeyTab:
+			if actions != nil {
+				u.app.SetFocus(actions)
+			}
+			return nil
+		}
+		return event
+	})
+
+	actions = tview.NewForm().
+		AddButton("Apply", applyPaste).
+		AddButton("Cancel", func() {
+			closeModal()
+			u.renderAll()
+		})
+	actions.SetButtonsAlign(tview.AlignLeft)
+	actions.SetInputCapture(func(event *tcell.EventKey) *tcell.EventKey {
+		switch event.Key() {
+		case tcell.KeyTab:
+			u.app.SetFocus(textArea)
+			return nil
+		case tcell.KeyEsc:
+			closeModal()
+			u.renderAll()
+			return nil
+		}
+		return event
+	})
+
+	content := tview.NewFlex().SetDirection(tview.FlexRow).
+		AddItem(textArea, 0, 1, true).
+		AddItem(help, 3, 0, false).
+		AddItem(actions, 3, 0, false)
+
+	frame := tview.NewFrame(content).
+		SetBorders(1, 1, 1, 1, 1, 1)
+	frame.AddText("Paste targets for this operator only. Apply replaces the current loaded target set. Ctrl-S applies.", false, tview.AlignCenter, tcell.ColorYellow)
+
+	modal := tview.NewFlex().
+		AddItem(nil, 0, 1, false).
+		AddItem(tview.NewFlex().SetDirection(tview.FlexRow).
+			AddItem(nil, 0, 1, false).
+			AddItem(frame, 0, 4, true).
+			AddItem(nil, 0, 1, false), 0, 3, true).
+		AddItem(nil, 0, 1, false)
+
+	u.pages.AddPage("paste-targets", modal, true, true)
+	u.app.SetFocus(textArea)
+}
+
 func (u *ui) savePrefixes() {
 	if u.scanRunning() {
-		u.blockDuringScan("Prefix save blocked while a scan is running.")
+		u.blockDuringScan("Target save blocked while a scan is running.")
 		return
 	}
 	operator := u.selectedOperator()
@@ -953,26 +1216,21 @@ func (u *ui) savePrefixes() {
 	u.renderAll()
 	result, ok := u.lookupCache[operator.Key]
 	if !ok || len(result.Entries) == 0 {
-		u.setStatus("No prefixes available yet.")
-		u.addActivity("Prefix save skipped: nothing loaded")
+		u.setStatus("No targets available yet.")
+		u.addActivity("Target save skipped: nothing loaded")
 		return
 	}
 
-	format, err := export.ParseFormat(u.prefixFormat)
-	if err != nil {
-		u.setStatus(err.Error())
-		u.addActivity("Prefix save failed: invalid export format")
-		return
-	}
+	format := export.FormatTXT
 	if err := export.SavePrefixes(savePath, format, result); err != nil {
 		u.setStatus(fmt.Sprintf("Save failed: %v", err))
-		u.addActivity(fmt.Sprintf("Prefix save failed for %s", operator.Name))
+		u.addActivity(fmt.Sprintf("Target save failed for %s", operator.Name))
 		return
 	}
 	u.rebuildForm()
 	u.renderAll()
-	u.setStatus(fmt.Sprintf("Saved prefixes to %s", savePath))
-	u.addActivity(fmt.Sprintf("Saved %s prefixes for %s", formatCount(uint64(len(result.Entries))), operator.Name))
+	u.setStatus(fmt.Sprintf("Saved targets to %s", savePath))
+	u.addActivity(fmt.Sprintf("Saved %s targets for %s", formatCount(uint64(len(result.Entries))), operator.Name))
 }
 
 func (u *ui) startScan() {
@@ -984,8 +1242,8 @@ func (u *ui) startScan() {
 		return
 	}
 	if len(selectedEntries) == 0 {
-		u.setStatus("Fetch prefixes first before starting a scan.")
-		u.addActivity(fmt.Sprintf("Scan blocked for %s: fetch prefixes first", operator.Name))
+		u.setStatus("Load targets first before starting a scan.")
+		u.addActivity(fmt.Sprintf("Scan blocked for %s: load targets first", operator.Name))
 		return
 	}
 	if u.scanCancel != nil {
@@ -1198,14 +1456,11 @@ func (u *ui) scanConfig() (scanner.Config, error) {
 
 func (u *ui) updateDefaultPaths() {
 	operator := u.selectedOperator()
-	prefixFormat, err := export.ParseFormat(u.prefixFormat)
-	if err == nil {
-		suggested := defaultOutputPath(operator.Key, "prefixes", prefixFormat)
-		if strings.TrimSpace(u.prefixPath) == "" || u.prefixPath == u.prefixSuggestedPath {
-			u.prefixPath = suggested
-		}
-		u.prefixSuggestedPath = suggested
+	suggested := defaultOutputPath(operator.Key, u.targetSaveSuffix(operator.Key), export.FormatTXT)
+	if strings.TrimSpace(u.prefixPath) == "" || u.prefixPath == u.prefixSuggestedPath {
+		u.prefixPath = suggested
 	}
+	u.prefixSuggestedPath = suggested
 	scanFormat, err := export.ParseFormat(u.scanFormat)
 	if err == nil {
 		suggested := defaultOutputPath(operator.Key, scanSaveSuffix(u.scanSaveScope), scanFormat)
@@ -1218,11 +1473,8 @@ func (u *ui) updateDefaultPaths() {
 
 func (u *ui) preparePrefixSaveTarget(operator model.Operator) string {
 	if strings.TrimSpace(u.prefixPath) == "" || u.prefixPath == u.prefixSuggestedPath {
-		format, err := export.ParseFormat(u.prefixFormat)
-		if err == nil {
-			u.prefixPath = defaultOutputPath(operator.Key, "prefixes", format)
-			u.prefixSuggestedPath = u.prefixPath
-		}
+		u.prefixPath = defaultOutputPath(operator.Key, u.targetSaveSuffix(operator.Key), export.FormatTXT)
+		u.prefixSuggestedPath = u.prefixPath
 	}
 	return strings.TrimSpace(u.prefixPath)
 }
@@ -1280,16 +1532,19 @@ func (u *ui) selectedScanSummary(operatorKey string) string {
 	case 0:
 		return "-"
 	case 1:
+		if entry, ok := u.lookupEntry(operatorKey, selected[0]); ok {
+			return displayTargetEntry(entry, u.lookupUsesCustomTargets(operatorKey))
+		}
 		return selected[0]
 	default:
-		return fmt.Sprintf("%d ranges selected", len(selected))
+		return fmt.Sprintf("%d targets selected", len(selected))
 	}
 }
 
 func (u *ui) selectedScanEntries(operatorKey string) ([]model.PrefixEntry, error) {
 	lookup, ok := u.lookupCache[operatorKey]
 	if !ok || len(lookup.Entries) == 0 {
-		return nil, fmt.Errorf("fetch prefixes first before starting a scan")
+		return nil, fmt.Errorf("load targets first before starting a scan")
 	}
 	u.ensureScanRangeSelection(operatorKey)
 	selected := make(map[string]struct{}, len(u.scanRanges[operatorKey]))
@@ -1303,7 +1558,7 @@ func (u *ui) selectedScanEntries(operatorKey string) ([]model.PrefixEntry, error
 		}
 	}
 	if len(entries) == 0 {
-		return nil, fmt.Errorf("selected scan ranges are no longer available")
+		return nil, fmt.Errorf("selected scan targets are no longer available")
 	}
 	return entries, nil
 }
@@ -1352,7 +1607,7 @@ func (u *ui) setStatus(message string) {
 }
 
 func (u *ui) renderStatus() {
-	modeLabel := "prefix mode"
+	modeLabel := "target mode"
 	if u.mode == screenScanner {
 		modeLabel = "dns mode"
 	}
@@ -1437,8 +1692,8 @@ func filterPrefixEntryIndexes(entries []model.PrefixEntry, query string) []int {
 	return indexes
 }
 
-func scanRangeLabel(entry model.PrefixEntry, selected bool) string {
-	label := fmt.Sprintf("%12s IPs  %s", formatCount(entry.TotalAddresses), entry.Prefix)
+func scanRangeLabel(entry model.PrefixEntry, imported bool, selected bool) string {
+	label := fmt.Sprintf("%12s %-3s  %s", formatCount(entry.TotalAddresses), targetCountUnit(entry.TotalAddresses), displayTargetEntry(entry, imported))
 	if selected {
 		return fmt.Sprintf("[black:lightskyblue]%s[-:-:-]", label)
 	}
@@ -1477,9 +1732,31 @@ func displayTransport(value string) string {
 	return text
 }
 
+func countImportLines(text string) int {
+	count := 0
+	for _, line := range strings.Split(text, "\n") {
+		if normalizeImportPreviewLine(line) == "" {
+			continue
+		}
+		count++
+	}
+	return count
+}
+
+func normalizeImportPreviewLine(line string) string {
+	line = strings.TrimSpace(line)
+	if line == "" {
+		return ""
+	}
+	if hashIndex := strings.Index(line, "#"); hashIndex >= 0 {
+		line = strings.TrimSpace(line[:hashIndex])
+	}
+	return line
+}
+
 func writeScanOptionGuide(builder *strings.Builder) {
 	builder.WriteString("Commands - DNS Scan\n")
-	builder.WriteString("  - Ranges: CIDRs selected for this scan. Use Pick Range to change them.\n")
+	builder.WriteString("  - Targets: CIDRs or file-imported / pasted single IPs selected for this scan. Use Pick Targets to change them.\n")
 	builder.WriteString("  - Workers: number of concurrent DNS probes. Higher is faster but heavier.\n")
 	builder.WriteString("  - Timeout: per-request timeout in milliseconds.\n")
 	builder.WriteString("  - Host Limit: maximum number of hosts to scan. Leave empty or 0 for the full selection.\n")
@@ -1591,6 +1868,162 @@ func mustProtocol(text, fallback string) string {
 		return fallback
 	}
 	return string(value)
+}
+
+func parseCustomTargets(operator model.Operator, sourceLabel, sourcePath, text string) (model.LookupResult, error) {
+	entries, totalAddresses, totalScanHosts, warnings, err := prefixes.ParseTXTTargets(text)
+	result := model.LookupResult{
+		Operator:       operator,
+		Entries:        entries,
+		TotalAddresses: totalAddresses,
+		TotalScanHosts: totalScanHosts,
+		FetchedAt:      time.Now(),
+		Warnings:       warnings,
+		SourceLabel:    sourceLabel,
+		SourcePath:     sourcePath,
+	}
+	return result, err
+}
+
+func (u *ui) selectedTargetSource(operatorKey string) targetSourceMode {
+	if mode, ok := u.targetSources[operatorKey]; ok && mode != "" {
+		return mode
+	}
+	return targetSourceRIPE
+}
+
+func (u *ui) setSelectedTargetSource(operatorKey string, mode targetSourceMode) {
+	if mode == "" {
+		delete(u.targetSources, operatorKey)
+		return
+	}
+	u.targetSources[operatorKey] = mode
+}
+
+func (u *ui) importPath(operatorKey string) string {
+	return u.importPaths[operatorKey]
+}
+
+func (u *ui) setImportPath(operatorKey, value string) {
+	trimmed := strings.TrimSpace(value)
+	if trimmed == "" {
+		delete(u.importPaths, operatorKey)
+		return
+	}
+	u.importPaths[operatorKey] = trimmed
+}
+
+func (u *ui) pasteBuffer(operatorKey string) string {
+	return u.pasteBuffers[operatorKey]
+}
+
+func (u *ui) setPasteBuffer(operatorKey, value string) {
+	if strings.TrimSpace(value) == "" {
+		delete(u.pasteBuffers, operatorKey)
+		return
+	}
+	u.pasteBuffers[operatorKey] = value
+}
+
+func (u *ui) pasteStatus(operatorKey string) string {
+	return u.pasteStatusFromText(u.pasteBuffer(operatorKey))
+}
+
+func (u *ui) pasteStatusFromText(text string) string {
+	lines := countImportLines(text)
+	switch lines {
+	case 0:
+		return "No pasted targets yet"
+	case 1:
+		return "1 line ready"
+	default:
+		return fmt.Sprintf("%d lines ready", lines)
+	}
+}
+
+func (u *ui) targetSaveSuffix(operatorKey string) string {
+	if lookup, ok := u.lookupCache[operatorKey]; ok && len(lookup.Entries) > 0 {
+		if lookupUsesCustomTargets(lookup) {
+			return "targets"
+		}
+		return "prefixes"
+	}
+	if mode := u.selectedTargetSource(operatorKey); mode == targetSourceImportTXT || mode == targetSourcePaste {
+		return "targets"
+	}
+	return "prefixes"
+}
+
+func (u *ui) lookupUsesCustomTargets(operatorKey string) bool {
+	lookup, ok := u.lookupCache[operatorKey]
+	return ok && lookupUsesCustomTargets(lookup)
+}
+
+func (u *ui) lookupEntry(operatorKey, prefix string) (model.PrefixEntry, bool) {
+	lookup, ok := u.lookupCache[operatorKey]
+	if !ok {
+		return model.PrefixEntry{}, false
+	}
+	for _, entry := range lookup.Entries {
+		if entry.Prefix == prefix {
+			return entry, true
+		}
+	}
+	return model.PrefixEntry{}, false
+}
+
+func primaryLoadButtonLabel(mode targetSourceMode) string {
+	if mode == targetSourceImportTXT {
+		return "Import TXT"
+	}
+	if mode == targetSourcePaste {
+		return "Paste Targets"
+	}
+	return "Load Targets"
+}
+
+func lookupUsesCustomTargets(result model.LookupResult) bool {
+	if strings.TrimSpace(result.SourcePath) != "" {
+		return true
+	}
+	switch result.SourceLabel {
+	case string(targetSourceImportTXT), string(targetSourcePaste):
+		return true
+	default:
+		return false
+	}
+}
+
+func displayTargetEntry(entry model.PrefixEntry, imported bool) string {
+	if !imported {
+		return entry.Prefix
+	}
+	if addr, ok := singleIPFromPrefix(entry.Prefix); ok {
+		return addr
+	}
+	return entry.Prefix
+}
+
+func singleIPFromPrefix(prefix string) (string, bool) {
+	parsed, err := netip.ParsePrefix(prefix)
+	if err != nil {
+		return "", false
+	}
+	if !parsed.Addr().Is4() || parsed.Bits() != 32 {
+		return "", false
+	}
+	return parsed.Addr().String(), true
+}
+
+func targetCountLabel(value uint64) string {
+	return fmt.Sprintf("%s %s", formatCount(value), targetCountUnit(value))
+}
+
+func targetCountUnit(value uint64) string {
+	if value == 1 {
+		return "IP"
+	}
+	return "IPs"
 }
 
 func (u *ui) operatorName(key string) string {
