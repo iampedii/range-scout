@@ -8,11 +8,13 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"slices"
 	"strconv"
 	"strings"
 	"time"
+	"unsafe"
 
 	"github.com/gdamore/tcell/v2"
 	"github.com/rivo/tview"
@@ -50,12 +52,16 @@ const (
 	formNoteWrapWidth    = 24
 	formSidebarWrapWidth = 20
 	uiSeparatorLine      = "────────────────────────"
+	uiVersionLabel       = "v0.1.5"
 	operatorPlaceholder  = "Paste or Import"
 	customOperatorKey    = "custom"
 	customOperatorName   = "Custom Targets"
 )
 
 var clipboardWriter = writeClipboardText
+var clipboardReader = readClipboardText
+var consoleScreenFactory = tcell.NewConsoleScreen
+var preferredWindowsScreenFactory = createPreferredWindowsScreen
 
 type scanProgress struct {
 	Scanned   uint64
@@ -123,6 +129,7 @@ type ui struct {
 	dnsttE2ETimeoutS    string
 	dnsttQuerySize      string
 	dnsttE2EPort        string
+	configPath          string
 	activityLines       []string
 	lastStatusLine      string
 	lockSelection       bool
@@ -164,6 +171,7 @@ func newUI() *ui {
 		dnsttQuerySize:   "",
 		dnsttE2EPort:     "53",
 	}
+	configStatus := u.loadStartupConfig()
 
 	u.configureViews()
 	u.populateOperators()
@@ -171,7 +179,12 @@ func newUI() *ui {
 	u.rebuildForm()
 	u.addActivity("Ready")
 	u.renderAll()
-	u.setStatus("Ready. Select an operator for Automatic API Fetch, or use Import TXT / Paste Targets without one.")
+	if configStatus != "" {
+		u.addActivity(configStatus)
+		u.setStatus(configStatus)
+	} else {
+		u.setStatus("Ready. Select an operator for Automatic API Fetch, or use Import TXT / Paste Targets without one.")
+	}
 
 	rightColumn := tview.NewFlex().SetDirection(tview.FlexRow).
 		AddItem(u.commands, 0, 1, false).
@@ -198,7 +211,49 @@ func newUI() *ui {
 }
 
 func (u *ui) Run() error {
+	screen := preferredScreenForRun(runtime.GOOS)
+	if screen != nil {
+		u.app.SetScreen(screen)
+		u.applyScreenFeatures(screen)
+	}
+
 	return u.app.Run()
+}
+
+func (u *ui) applyScreenFeatures(screen tcell.Screen) {
+	if screen == nil {
+		return
+	}
+	// tview's SetScreen() initializes the screen immediately before Run(), which
+	// means Run() skips its normal screen setup path. Reapply the app-level
+	// features we expect on our preferred Windows screen.
+	screen.EnableMouse()
+	screen.EnablePaste()
+}
+
+func preferredScreenForRun(goos string) tcell.Screen {
+	if goos != "windows" {
+		return nil
+	}
+	screen, err := preferredWindowsScreenFactory()
+	if err != nil {
+		return nil
+	}
+	return screen
+}
+
+func createPreferredWindowsScreen() (tcell.Screen, error) {
+	// Prefer the native Windows console backend when it can actually initialize.
+	// If the probe fails, the caller falls back to tview/tcell's default backend.
+	probe, err := consoleScreenFactory()
+	if err != nil {
+		return nil, err
+	}
+	if err := probe.Init(); err != nil {
+		return nil, err
+	}
+	probe.Fini()
+	return consoleScreenFactory()
 }
 
 func (u *ui) configureViews() {
@@ -272,15 +327,22 @@ func (u *ui) populateOperators() {
 }
 
 func (u *ui) handleKeys(event *tcell.EventKey) *tcell.EventKey {
-	if u.pages.HasPage("range-picker") || u.pages.HasPage("paste-targets") || u.pages.HasPage("confirm-exit") {
-		return event
-	}
-
 	if u.focusIsEditable() {
+		if isClipboardPasteEvent(event) {
+			if err := u.pasteClipboardIntoFocusedEditable(); err != nil {
+				u.setStatus(fmt.Sprintf("Clipboard paste failed: %v", err))
+				u.addActivity("Clipboard paste failed")
+			}
+			return nil
+		}
 		if event.Key() == tcell.KeyEsc {
 			u.app.SetFocus(u.operatorList)
 			return nil
 		}
+		return event
+	}
+
+	if u.pages.HasPage("range-picker") || u.pages.HasPage("paste-targets") || u.pages.HasPage("confirm-exit") {
 		return event
 	}
 
@@ -393,7 +455,7 @@ func (u *ui) focusIsEditable() bool {
 	}
 
 	switch u.app.GetFocus().(type) {
-	case *tview.InputField, *tview.DropDown:
+	case *tview.InputField, *tview.DropDown, *tview.TextArea:
 		return true
 	default:
 		return false
@@ -410,11 +472,107 @@ func formHasEditableFocus(form *tview.Form) bool {
 			continue
 		}
 		switch item.(type) {
-		case *tview.InputField, *tview.DropDown:
+		case *tview.InputField, *tview.DropDown, *tview.TextArea:
 			return true
 		}
 	}
 	return false
+}
+
+func isClipboardPasteEvent(event *tcell.EventKey) bool {
+	if event == nil {
+		return false
+	}
+	if event.Key() == tcell.KeyCtrlV {
+		return true
+	}
+	if event.Key() == tcell.KeyInsert && event.Modifiers()&tcell.ModShift != 0 {
+		return true
+	}
+	if event.Key() == tcell.KeyRune && event.Modifiers()&tcell.ModCtrl != 0 {
+		return event.Rune() == 'v' || event.Rune() == 'V'
+	}
+	return false
+}
+
+func configureInputFieldClipboard(field *tview.InputField) *tview.InputField {
+	if textArea := inputFieldTextArea(field); textArea != nil {
+		configureTextAreaClipboard(textArea)
+	}
+	return field
+}
+
+func configureTextAreaClipboard(textArea *tview.TextArea) *tview.TextArea {
+	if textArea == nil {
+		return nil
+	}
+	textArea.SetClipboard(func(text string) {
+		_ = clipboardWriter(text)
+	}, func() string {
+		text, err := clipboardReader()
+		if err != nil {
+			return ""
+		}
+		return normalizeClipboardText(text)
+	})
+	return textArea
+}
+
+func inputFieldTextArea(field *tview.InputField) *tview.TextArea {
+	if field == nil {
+		return nil
+	}
+	value := reflect.ValueOf(field)
+	if !value.IsValid() || value.IsNil() {
+		return nil
+	}
+	textAreaField := value.Elem().FieldByName("textArea")
+	if !textAreaField.IsValid() || textAreaField.IsNil() || !textAreaField.CanAddr() {
+		return nil
+	}
+	textAreaValue := reflect.NewAt(textAreaField.Type(), unsafe.Pointer(textAreaField.UnsafeAddr())).Elem()
+	textArea, _ := textAreaValue.Interface().(*tview.TextArea)
+	return textArea
+}
+
+func (u *ui) pasteClipboardIntoFocusedEditable() error {
+	target := u.focusedEditablePrimitive()
+	if target == nil {
+		return nil
+	}
+
+	text, err := clipboardReader()
+	if err != nil {
+		return err
+	}
+	text = normalizeClipboardText(text)
+
+	handler := target.PasteHandler()
+	if handler == nil {
+		return nil
+	}
+	handler(text, func(p tview.Primitive) {
+		u.app.SetFocus(p)
+	})
+	return nil
+}
+
+func (u *ui) focusedEditablePrimitive() tview.Primitive {
+	switch primitive := u.app.GetFocus().(type) {
+	case *tview.InputField, *tview.DropDown, *tview.TextArea:
+		return primitive
+	case *tview.Form:
+		for index := 0; index < primitive.GetFormItemCount(); index++ {
+			item := primitive.GetFormItem(index)
+			if item == nil || !item.HasFocus() {
+				continue
+			}
+			if editable, ok := item.(tview.Primitive); ok {
+				return editable
+			}
+		}
+	}
+	return nil
 }
 
 func (u *ui) currentOperator() (model.Operator, bool) {
@@ -501,6 +659,7 @@ func (u *ui) rebuildForm() {
 			u.form.SetTitle("Commands - Scan Running")
 			u.addButtonRow(0, buttonSpec{label: "Stop Scan", action: u.stopScan})
 		}
+		u.addButtonRow(2, buttonSpec{label: "Save Config", action: u.saveConfig})
 		u.rebuildCommands()
 		return
 	}
@@ -544,10 +703,14 @@ func (u *ui) rebuildForm() {
 				buttonSpec{label: "Scan Setup", action: u.openScanner},
 			)
 		}
+		u.addButtonRow(2, buttonSpec{label: "Save Config", action: u.saveConfig})
 	case screenScanner:
 		if !hasOperator && !u.hasFetchedPrefixes(targetKey) && !u.hasCompletedScan(targetKey) && u.activeScanOperator != targetKey && u.activeDNSTTOperator != targetKey {
 			u.form.SetTitle("Commands - DNS Scan")
-			u.addButtonRow(2, buttonSpec{label: "Back", action: u.backToPrefixes})
+			u.addButtonRow(2,
+				buttonSpec{label: "Back", action: u.backToPrefixes},
+				buttonSpec{label: "Save Config", action: u.saveConfig},
+			)
 			u.rebuildCommands()
 			return
 		}
@@ -590,12 +753,16 @@ func (u *ui) rebuildForm() {
 		}
 		u.addButtonRow(2,
 			buttonSpec{label: "Back", action: u.backToPrefixes},
+			buttonSpec{label: "Save Config", action: u.saveConfig},
 		)
 	case screenDNSTT:
 		operatorKey := targetKey
 		if !u.hasCompletedScan(operatorKey) && u.activeScanOperator != operatorKey {
 			u.form.SetTitle("Commands - DNSTT E2E")
-			u.addButtonRow(2, buttonSpec{label: "Back", action: u.backToScanner})
+			u.addButtonRow(2,
+				buttonSpec{label: "Back", action: u.backToScanner},
+				buttonSpec{label: "Save Config", action: u.saveConfig},
+			)
 			u.rebuildCommands()
 			return
 		}
@@ -639,13 +806,16 @@ func (u *ui) rebuildForm() {
 				buttonSpec{label: "Copy Passed", action: u.copyPassedResolvers},
 			)
 		}
-		u.addButtonRow(2, buttonSpec{label: "Back", action: u.backToScanner})
+		u.addButtonRow(2,
+			buttonSpec{label: "Back", action: u.backToScanner},
+			buttonSpec{label: "Save Config", action: u.saveConfig},
+		)
 	}
 	u.rebuildCommands()
 }
 
 func (u *ui) newInput(label, value string, onChange func(string)) *tview.InputField {
-	field := tview.NewInputField().SetLabel(label + ": ").SetText(value)
+	field := configureInputFieldClipboard(tview.NewInputField()).SetLabel(label + ": ").SetText(value)
 	field.SetChangedFunc(onChange)
 	return field
 }
@@ -853,7 +1023,7 @@ func (u *ui) renderHeader() {
 		operatorName = operator.Name
 		viewKey = operator.Key
 	}
-	line1 := fmt.Sprintf("[yellow]%s[-]  [cyan]%s[-]", operatorName, modeLabel)
+	line1 := fmt.Sprintf("[yellow]%s[-]  [cyan]%s[-]  [white]%s[-]", operatorName, modeLabel, uiVersionLabel)
 	line2 := "p targets  f load  q exit"
 	if u.mode == screenScanner && viewKey != "" {
 		operatorKey := viewKey
@@ -955,6 +1125,7 @@ func (u *ui) openRangePicker() {
 		SetLabel("Filter: ").
 		SetText("").
 		SetPlaceholder("CIDR, IP, slash, or fragment")
+	configureInputFieldClipboard(search)
 	search.SetPlaceholderTextColor(tcell.ColorGray)
 	list := tview.NewList()
 	list.ShowSecondaryText(false)
@@ -1546,6 +1717,7 @@ func (u *ui) openPasteTargetsModal() {
 	textArea := tview.NewTextArea().
 		SetWrap(false).
 		SetPlaceholder("198.51.100.0/24\n198.51.100.10\n# comments supported")
+	configureTextAreaClipboard(textArea)
 	textArea.SetBorder(true).SetTitle("Paste Targets")
 	textArea.SetText(u.pasteBuffer(operator.Key), false)
 	textArea.SetOffset(0, 0)
@@ -3345,6 +3517,44 @@ func writeClipboardText(text string) error {
 	}
 }
 
+func readClipboardText() (string, error) {
+	switch runtime.GOOS {
+	case "darwin":
+		return runClipboardReadCommand("pbpaste", nil)
+	case "windows":
+		for _, candidate := range []struct {
+			name string
+			args []string
+		}{
+			{name: "powershell.exe", args: []string{"-NoProfile", "-NonInteractive", "-Command", "Get-Clipboard -Raw"}},
+			{name: "powershell", args: []string{"-NoProfile", "-NonInteractive", "-Command", "Get-Clipboard -Raw"}},
+			{name: "pwsh.exe", args: []string{"-NoProfile", "-NonInteractive", "-Command", "Get-Clipboard -Raw"}},
+			{name: "pwsh", args: []string{"-NoProfile", "-NonInteractive", "-Command", "Get-Clipboard -Raw"}},
+		} {
+			if _, err := exec.LookPath(candidate.name); err != nil {
+				continue
+			}
+			return runClipboardReadCommand(candidate.name, candidate.args)
+		}
+		return "", fmt.Errorf("no clipboard command found (powershell, pwsh)")
+	default:
+		for _, candidate := range []struct {
+			name string
+			args []string
+		}{
+			{name: "wl-paste"},
+			{name: "xclip", args: []string{"-selection", "clipboard", "-o"}},
+			{name: "xsel", args: []string{"--clipboard", "--output"}},
+		} {
+			if _, err := exec.LookPath(candidate.name); err != nil {
+				continue
+			}
+			return runClipboardReadCommand(candidate.name, candidate.args)
+		}
+		return "", fmt.Errorf("no clipboard command found (wl-paste, xclip, xsel)")
+	}
+}
+
 func runClipboardCommand(name string, args []string, text string) error {
 	if _, err := exec.LookPath(name); err != nil {
 		return fmt.Errorf("%s not found in PATH", name)
@@ -3362,6 +3572,33 @@ func runClipboardCommand(name string, args []string, text string) error {
 		return err
 	}
 	return fmt.Errorf("%v: %s", err, message)
+}
+
+func runClipboardReadCommand(name string, args []string) (string, error) {
+	if _, err := exec.LookPath(name); err != nil {
+		return "", fmt.Errorf("%s not found in PATH", name)
+	}
+
+	cmd := exec.Command(name, args...)
+	output, err := cmd.Output()
+	if err == nil {
+		return normalizeClipboardText(string(output)), nil
+	}
+
+	var message string
+	if exitErr, ok := err.(*exec.ExitError); ok {
+		message = strings.TrimSpace(string(exitErr.Stderr))
+	}
+	if message == "" {
+		return "", err
+	}
+	return "", fmt.Errorf("%v: %s", err, message)
+}
+
+func normalizeClipboardText(text string) string {
+	text = strings.ReplaceAll(text, "\r\n", "\n")
+	text = strings.ReplaceAll(text, "\r", "\n")
+	return text
 }
 
 func mustInt(text string, fallback int) int {
@@ -3422,6 +3659,12 @@ func (u *ui) setSelectedTargetSource(operatorKey string, mode targetSourceMode) 
 }
 
 func (u *ui) importPath(operatorKey string) string {
+	if path := u.importPaths[operatorKey]; strings.TrimSpace(path) != "" {
+		return path
+	}
+	if path := u.importPaths[defaultImportConfigKey]; strings.TrimSpace(path) != "" {
+		return path
+	}
 	return u.importPaths[operatorKey]
 }
 

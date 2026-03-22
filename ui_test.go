@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"os"
 	"regexp"
 	"strings"
@@ -485,6 +486,81 @@ func TestHandleKeysDoesNotTriggerHotkeysWhileEditingProbeField(t *testing.T) {
 	}
 }
 
+func TestHandleKeysPastesClipboardIntoFocusedInputField(t *testing.T) {
+	u := newUI()
+
+	field := u.newInput("Test", "", func(string) {})
+	u.form.Clear(true)
+	u.form.AddFormItem(field)
+	u.form.SetFocus(0)
+	u.app.SetFocus(u.form)
+
+	originalReader := clipboardReader
+	clipboardReader = func() (string, error) {
+		return "198.51.100.10", nil
+	}
+	defer func() {
+		clipboardReader = originalReader
+	}()
+
+	event := tcell.NewEventKey(tcell.KeyCtrlV, 0, tcell.ModNone)
+	if got := u.handleKeys(event); got != nil {
+		t.Fatal("expected clipboard paste shortcut to be consumed")
+	}
+	if got := field.GetText(); got != "198.51.100.10" {
+		t.Fatalf("expected clipboard text to be pasted into input field, got %q", got)
+	}
+}
+
+func TestHandleKeysPastesClipboardIntoFocusedModalTextArea(t *testing.T) {
+	u := newUI()
+	u.openPasteTargetsModal()
+
+	textArea := findTextArea(u.pages)
+	if textArea == nil {
+		t.Fatal("expected paste modal text area to be present")
+	}
+	u.app.SetFocus(textArea)
+
+	if !u.focusIsEditable() {
+		t.Fatal("expected modal text area focus to be treated as editable")
+	}
+
+	originalReader := clipboardReader
+	clipboardReader = func() (string, error) {
+		return "198.51.100.0/24\r\n198.51.100.11", nil
+	}
+	defer func() {
+		clipboardReader = originalReader
+	}()
+
+	event := tcell.NewEventKey(tcell.KeyCtrlV, 0, tcell.ModNone)
+	if got := u.handleKeys(event); got != nil {
+		t.Fatal("expected clipboard paste shortcut to be consumed in modal text area")
+	}
+	if got := textArea.GetText(); got != "198.51.100.0/24\n198.51.100.11" {
+		t.Fatalf("expected normalized clipboard text in modal text area, got %q", got)
+	}
+}
+
+func TestConfiguredInputFieldUsesSystemClipboardForCtrlV(t *testing.T) {
+	originalReader := clipboardReader
+	clipboardReader = func() (string, error) {
+		return "203.0.113.9", nil
+	}
+	defer func() {
+		clipboardReader = originalReader
+	}()
+
+	field := configureInputFieldClipboard(tview.NewInputField())
+	handler := field.InputHandler()
+	handler(tcell.NewEventKey(tcell.KeyCtrlV, 0, tcell.ModNone), func(tview.Primitive) {})
+
+	if got := field.GetText(); got != "203.0.113.9" {
+		t.Fatalf("expected configured input field to paste from system clipboard, got %q", got)
+	}
+}
+
 func TestNewUIDoesNotSelectOperatorByDefaultAndUsesGenericPaths(t *testing.T) {
 	u := newUI()
 
@@ -499,6 +575,118 @@ func TestNewUIDoesNotSelectOperatorByDefaultAndUsesGenericPaths(t *testing.T) {
 	}
 	if !strings.Contains(u.scanPath, "exports/dns-scan-success-custom_") {
 		t.Fatalf("expected generic scan path before operator selection, got %q", u.scanPath)
+	}
+}
+
+func TestNewUIShowsSaveConfigButton(t *testing.T) {
+	u := newUI()
+
+	if !u.hasButton("Save Config") {
+		t.Fatal("expected Save Config button to be present")
+	}
+}
+
+func TestRenderHeaderShowsVersionLabel(t *testing.T) {
+	u := newUI()
+	u.renderHeader()
+
+	text := u.header.GetText(true)
+	if !strings.Contains(text, uiVersionLabel) {
+		t.Fatalf("expected header to include version label, got: %s", text)
+	}
+}
+
+func TestPreferredScreenForRunUsesConsoleScreenOnWindows(t *testing.T) {
+	previousFactory := preferredWindowsScreenFactory
+	expectedScreen := tcell.NewSimulationScreen("")
+	called := false
+	preferredWindowsScreenFactory = func() (tcell.Screen, error) {
+		called = true
+		return expectedScreen, nil
+	}
+	defer func() {
+		preferredWindowsScreenFactory = previousFactory
+	}()
+
+	screen := preferredScreenForRun("windows")
+	if !called {
+		t.Fatal("expected Windows startup to request a preferred Windows screen")
+	}
+	if screen != expectedScreen {
+		t.Fatal("expected Windows startup to use the preferred Windows screen returned by the factory")
+	}
+}
+
+func TestPreferredScreenForRunFallsBackWhenPreferredWindowsScreenFails(t *testing.T) {
+	previousFactory := preferredWindowsScreenFactory
+	called := false
+	preferredWindowsScreenFactory = func() (tcell.Screen, error) {
+		called = true
+		return nil, errors.New("console backend unavailable")
+	}
+	defer func() {
+		preferredWindowsScreenFactory = previousFactory
+	}()
+
+	screen := preferredScreenForRun("windows")
+	if !called {
+		t.Fatal("expected Windows startup to try the preferred Windows screen")
+	}
+	if screen != nil {
+		t.Fatal("expected Windows startup to fall back to the default screen when the preferred screen fails")
+	}
+}
+
+func TestPreferredScreenForRunLeavesNonWindowsUnchanged(t *testing.T) {
+	previousFactory := preferredWindowsScreenFactory
+	called := false
+	preferredWindowsScreenFactory = func() (tcell.Screen, error) {
+		called = true
+		return tcell.NewSimulationScreen(""), nil
+	}
+	defer func() {
+		preferredWindowsScreenFactory = previousFactory
+	}()
+
+	screen := preferredScreenForRun("darwin")
+	if screen != nil {
+		t.Fatal("expected no preferred screen outside Windows")
+	}
+	if called {
+		t.Fatal("did not expect non-Windows startup to request a preferred Windows screen")
+	}
+}
+
+func TestApplyScreenFeaturesEnablesMouseAndPaste(t *testing.T) {
+	u := newUI()
+	screen := &recordingScreen{Screen: tcell.NewSimulationScreen("")}
+
+	u.applyScreenFeatures(screen)
+
+	if !screen.mouseEnabled {
+		t.Fatal("expected preferred screen to have mouse enabled")
+	}
+	if !screen.pasteEnabled {
+		t.Fatal("expected preferred screen to have paste enabled")
+	}
+}
+
+func TestIsClipboardPasteEvent(t *testing.T) {
+	tests := []struct {
+		name  string
+		event *tcell.EventKey
+		want  bool
+	}{
+		{name: "ctrl-v", event: tcell.NewEventKey(tcell.KeyCtrlV, 0, tcell.ModNone), want: true},
+		{name: "shift-insert", event: tcell.NewEventKey(tcell.KeyInsert, 0, tcell.ModShift), want: true},
+		{name: "ctrl-shift-v-rune", event: tcell.NewEventKey(tcell.KeyRune, 'V', tcell.ModCtrl|tcell.ModShift), want: true},
+		{name: "plain-v", event: tcell.NewEventKey(tcell.KeyRune, 'v', tcell.ModNone), want: false},
+	}
+
+	for _, tt := range tests {
+		if got := isClipboardPasteEvent(tt.event); got != tt.want {
+			t.Fatalf("%s: expected %v, got %v", tt.name, tt.want, got)
+		}
 	}
 }
 
@@ -1334,6 +1522,25 @@ func findTextArea(primitive tview.Primitive) *tview.TextArea {
 				return found
 			}
 		}
+	case *tview.Pages:
+		_, front := p.GetFrontPage()
+		return findTextArea(front)
 	}
 	return nil
+}
+
+type recordingScreen struct {
+	tcell.Screen
+	mouseEnabled bool
+	pasteEnabled bool
+}
+
+func (s *recordingScreen) EnableMouse(flags ...tcell.MouseFlags) {
+	s.mouseEnabled = true
+	s.Screen.EnableMouse(flags...)
+}
+
+func (s *recordingScreen) EnablePaste() {
+	s.pasteEnabled = true
+	s.Screen.EnablePaste()
 }

@@ -29,11 +29,60 @@
 
 ## Build
 
-Requires Go `1.24.0` or newer.
+The repo pins the Go toolchain to `1.24.1` for reproducible builds. If your
+local `go` command is older, Go will auto-download the pinned toolchain when
+needed.
 
 ```bash
-go build -o range-scout .
+make build
 ```
+
+This builds a local development binary at `./range-scout`.
+
+To produce a distributable artifact for the current platform:
+
+```bash
+make build-dist
+```
+
+To produce a Windows tester build:
+
+```bash
+make build-windows
+```
+
+That writes `dist/range-scout-windows-amd64.exe`.
+
+## Release Builds
+
+The git tag is the release source of truth. This matches a normal GitFlow
+process:
+
+- tag `v0.1.5` for a final release
+- tag `v0.1.5-rc1` or `v0.1.5-rc2` for release candidates
+
+To build a release artifact from the current tag:
+
+```bash
+make release
+```
+
+To build a Windows release artifact from the current tag:
+
+```bash
+make release-windows
+```
+
+Release builds are intentionally strict:
+
+- `HEAD` must be exactly on a tag such as `v0.1.5` or `v0.1.5-rc1`
+- the git worktree must be clean
+
+If those checks pass, the artifact filename will match the release tag exactly.
+
+The in-app version shown in the header is a manual constant in
+`ui.go` (`uiVersionLabel`). Update that value before tagging a new release so
+bug reports and release artifacts stay aligned.
 
 ## Run
 
@@ -44,8 +93,53 @@ go build -o range-scout .
 For a one-off run without building:
 
 ```bash
-go run .
+make run
 ```
+
+## Config
+
+You can place an optional `config.json` next to the project and `range-scout`
+will load it on startup. The app first looks in the current working directory.
+If there is no config there, it also checks next to the `range-scout` binary.
+
+Example:
+
+```json
+{
+  "importConfig": {
+    "importFilePaths": {
+      "default": "targets/default.txt"
+    }
+  },
+  "scanConfig": {
+    "workers": "256",
+    "timeoutMS": "1200",
+    "port": "53",
+    "protocol": "udp",
+    "recursionHost": "google.com",
+    "probeHost1": "github.com",
+    "probeHost2": "example.com"
+  },
+  "dnsttConfig": {
+    "domain": "t.example.com",
+    "pubkey": "",
+    "timeoutMS": "3000",
+    "e2eTimeoutS": "20",
+    "querySize": "",
+    "e2ePort": "53"
+  }
+}
+```
+
+Notes:
+
+- `importFilePaths` may be a single string or an object map.
+- The app writes UI field values back as strings when you use `Save Config`.
+- Use `"default"` to provide a fallback import path for any operator.
+- Relative import paths are resolved relative to the `config.json` directory.
+- `Save Config` keeps import paths relative to the config file when possible, so shared configs stay portable.
+- The config file sets startup defaults; it does not auto-run imports, scans, or DNSTT.
+- Ask bug reporters to include the version shown in the header, for example `v0.1.5`.
 
 ## Quick Guide
 

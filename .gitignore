@@ -1,5 +1,7 @@
 exports/
+dist/
 *.out
 .DS_Store
 range-scout
 bin/
+config.json
