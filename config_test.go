@@ -28,7 +28,9 @@ func TestLoadAppConfigSupportsFlexibleValues(t *testing.T) {
     "timeoutMS": 4000,
     "e2eTimeoutS": 30,
     "querySize": "",
-    "e2ePort": 53
+    "scoreThreshold": 3,
+    "e2eURL": "https://example.com/generate_204",
+    "testNearbyIPs": "Yes"
   }
 }`
 	if err := os.WriteFile(configPath, []byte(configJSON), 0o600); err != nil {
@@ -55,8 +57,14 @@ func TestLoadAppConfigSupportsFlexibleValues(t *testing.T) {
 	if !cfg.DNSTTConfig.TimeoutMS.Set || cfg.DNSTTConfig.TimeoutMS.Value != "4000" {
 		t.Fatalf("unexpected DNSTT timeout config: %+v", cfg.DNSTTConfig.TimeoutMS)
 	}
-	if !cfg.DNSTTConfig.E2EPort.Set || cfg.DNSTTConfig.E2EPort.Value != "53" {
-		t.Fatalf("unexpected DNSTT e2e port config: %+v", cfg.DNSTTConfig.E2EPort)
+	if !cfg.DNSTTConfig.ScoreThreshold.Set || cfg.DNSTTConfig.ScoreThreshold.Value != "3" {
+		t.Fatalf("unexpected DNSTT score threshold config: %+v", cfg.DNSTTConfig.ScoreThreshold)
+	}
+	if !cfg.DNSTTConfig.E2EURL.Set || cfg.DNSTTConfig.E2EURL.Value != "https://example.com/generate_204" {
+		t.Fatalf("unexpected DNSTT e2e url config: %+v", cfg.DNSTTConfig.E2EURL)
+	}
+	if !cfg.DNSTTConfig.TestNearbyIPs.Set || cfg.DNSTTConfig.TestNearbyIPs.Value != "Yes" {
+		t.Fatalf("unexpected DNSTT nearby setting: %+v", cfg.DNSTTConfig.TestNearbyIPs)
 	}
 }
 
@@ -81,12 +89,14 @@ func TestApplyAppConfigSetsUIState(t *testing.T) {
 			ProbeHost2:    configured("example.com"),
 		},
 		DNSTTConfig: dnsttStageConfig{
-			Domain:      configured("t.example.com"),
-			Pubkey:      configured("deadbeef"),
-			TimeoutMS:   configured("4500"),
-			E2ETimeoutS: configured("25"),
-			QuerySize:   configured("1400"),
-			E2EPort:     configured("443"),
+			Domain:         configured("t.example.com"),
+			Pubkey:         configured("deadbeef"),
+			TimeoutMS:      configured("4500"),
+			E2ETimeoutS:    configured("25"),
+			QuerySize:      configured("1400"),
+			ScoreThreshold: configured("4"),
+			E2EURL:         configured("https://example.com/generate_204"),
+			TestNearbyIPs:  configured("Yes"),
 		},
 	}, configDir)
 
@@ -106,8 +116,8 @@ func TestApplyAppConfigSetsUIState(t *testing.T) {
 	if u.scanProtocol != "both" || u.scanRecursionURL != "cloudflare.com" || u.scanProbeURL1 != "github.com" || u.scanProbeURL2 != "example.com" {
 		t.Fatalf("unexpected scan host config: protocol=%q recursion=%q probe1=%q probe2=%q", u.scanProtocol, u.scanRecursionURL, u.scanProbeURL1, u.scanProbeURL2)
 	}
-	if u.dnsttDomain != "t.example.com" || u.dnsttPubkey != "deadbeef" || u.dnsttTimeoutMS != "4500" || u.dnsttE2ETimeoutS != "25" || u.dnsttQuerySize != "1400" || u.dnsttE2EPort != "443" {
-		t.Fatalf("unexpected DNSTT config: domain=%q pubkey=%q timeout=%q e2eTimeout=%q querySize=%q e2ePort=%q", u.dnsttDomain, u.dnsttPubkey, u.dnsttTimeoutMS, u.dnsttE2ETimeoutS, u.dnsttQuerySize, u.dnsttE2EPort)
+	if u.dnsttDomain != "t.example.com" || u.dnsttPubkey != "deadbeef" || u.dnsttTimeoutMS != "4500" || u.dnsttE2ETimeoutS != "25" || u.dnsttQuerySize != "1400" || u.dnsttScoreThreshold != "4" || u.dnsttE2EURL != "https://example.com/generate_204" || u.dnsttNearbyIPs != yesOption {
+		t.Fatalf("unexpected DNSTT config: domain=%q pubkey=%q timeout=%q e2eTimeout=%q querySize=%q threshold=%q e2eURL=%q nearby=%q", u.dnsttDomain, u.dnsttPubkey, u.dnsttTimeoutMS, u.dnsttE2ETimeoutS, u.dnsttQuerySize, u.dnsttScoreThreshold, u.dnsttE2EURL, u.dnsttNearbyIPs)
 	}
 }
 
@@ -131,7 +141,9 @@ func TestSaveAppConfigRoundTripsCurrentUIState(t *testing.T) {
 	u.dnsttTimeoutMS = "4200"
 	u.dnsttE2ETimeoutS = "22"
 	u.dnsttQuerySize = "1400"
-	u.dnsttE2EPort = "443"
+	u.dnsttScoreThreshold = "5"
+	u.dnsttE2EURL = "https://example.com/generate_204"
+	u.dnsttNearbyIPs = yesOption
 
 	if err := saveAppConfig(configPath, u.currentAppConfig()); err != nil {
 		t.Fatalf("saveAppConfig returned error: %v", err)
@@ -157,8 +169,14 @@ func TestSaveAppConfigRoundTripsCurrentUIState(t *testing.T) {
 	if got := cfg.ScanConfig.Protocol.Value; got != "tcp" {
 		t.Fatalf("unexpected saved protocol value: %q", got)
 	}
-	if got := cfg.DNSTTConfig.E2EPort.Value; got != "443" {
-		t.Fatalf("unexpected saved e2e port value: %q", got)
+	if got := cfg.DNSTTConfig.E2EURL.Value; got != "https://example.com/generate_204" {
+		t.Fatalf("unexpected saved e2e url value: %q", got)
+	}
+	if got := cfg.DNSTTConfig.ScoreThreshold.Value; got != "5" {
+		t.Fatalf("unexpected saved score threshold value: %q", got)
+	}
+	if got := cfg.DNSTTConfig.TestNearbyIPs.Value; got != yesOption {
+		t.Fatalf("unexpected saved nearby setting: %q", got)
 	}
 }
 

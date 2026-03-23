@@ -38,12 +38,15 @@ type scanStageConfig struct {
 }
 
 type dnsttStageConfig struct {
-	Domain      configValue `json:"domain"`
-	Pubkey      configValue `json:"pubkey"`
-	TimeoutMS   configValue `json:"timeoutMS"`
-	E2ETimeoutS configValue `json:"e2eTimeoutS"`
-	QuerySize   configValue `json:"querySize"`
-	E2EPort     configValue `json:"e2ePort"`
+	Domain         configValue `json:"domain"`
+	Pubkey         configValue `json:"pubkey"`
+	TimeoutMS      configValue `json:"timeoutMS"`
+	E2ETimeoutS    configValue `json:"e2eTimeoutS"`
+	QuerySize      configValue `json:"querySize"`
+	ScoreThreshold configValue `json:"scoreThreshold"`
+	E2EURL         configValue `json:"e2eURL"`
+	TestNearbyIPs  configValue `json:"testNearbyIPs"`
+	E2EPort        configValue `json:"e2ePort"`
 }
 
 type configValue struct {
@@ -153,12 +156,14 @@ func (u *ui) currentAppConfig() appConfig {
 			ProbeHost2:    configValue{Value: u.scanProbeURL2, Set: true},
 		},
 		DNSTTConfig: dnsttStageConfig{
-			Domain:      configValue{Value: u.dnsttDomain, Set: true},
-			Pubkey:      configValue{Value: u.dnsttPubkey, Set: true},
-			TimeoutMS:   configValue{Value: u.dnsttTimeoutMS, Set: true},
-			E2ETimeoutS: configValue{Value: u.dnsttE2ETimeoutS, Set: true},
-			QuerySize:   configValue{Value: u.dnsttQuerySize, Set: true},
-			E2EPort:     configValue{Value: u.dnsttE2EPort, Set: true},
+			Domain:         configValue{Value: u.dnsttDomain, Set: true},
+			Pubkey:         configValue{Value: u.dnsttPubkey, Set: true},
+			TimeoutMS:      configValue{Value: u.dnsttTimeoutMS, Set: true},
+			E2ETimeoutS:    configValue{Value: u.dnsttE2ETimeoutS, Set: true},
+			QuerySize:      configValue{Value: u.dnsttQuerySize, Set: true},
+			ScoreThreshold: configValue{Value: u.dnsttScoreThreshold, Set: true},
+			E2EURL:         configValue{Value: u.dnsttE2EURL, Set: true},
+			TestNearbyIPs:  configValue{Value: normalizeYesNoValue(u.dnsttNearbyIPs), Set: true},
 		},
 	}
 }
@@ -246,8 +251,14 @@ func (u *ui) applyAppConfig(cfg appConfig, configDir string) {
 	if cfg.DNSTTConfig.QuerySize.Set {
 		u.dnsttQuerySize = cfg.DNSTTConfig.QuerySize.Value
 	}
-	if cfg.DNSTTConfig.E2EPort.Set {
-		u.dnsttE2EPort = cfg.DNSTTConfig.E2EPort.Value
+	if cfg.DNSTTConfig.ScoreThreshold.Set {
+		u.dnsttScoreThreshold = cfg.DNSTTConfig.ScoreThreshold.Value
+	}
+	if cfg.DNSTTConfig.E2EURL.Set {
+		u.dnsttE2EURL = cfg.DNSTTConfig.E2EURL.Value
+	}
+	if cfg.DNSTTConfig.TestNearbyIPs.Set {
+		u.dnsttNearbyIPs = normalizeYesNoValue(cfg.DNSTTConfig.TestNearbyIPs.Value)
 	}
 }
 

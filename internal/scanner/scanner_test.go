@@ -14,205 +14,56 @@ import (
 	"range-scout/internal/model"
 )
 
-func TestProbeResolverReachableWithoutRecursion(t *testing.T) {
-	port, shutdown := startTestDNSServer(t, func(w dns.ResponseWriter, r *dns.Msg) {
-		reply := new(dns.Msg)
-		reply.SetReply(r)
-		reply.Rcode = dns.RcodeRefused
-		reply.RecursionAvailable = false
-		_ = w.WriteMsg(reply)
-	})
+func TestProbeResolverScoresFullyCompatibleResolvers(t *testing.T) {
+	const domain = "tun.example.com."
+
+	port, shutdown := startTestDNSServer(t, fullyCompatibleHandler(domain))
 	defer shutdown()
 
 	resolver, ok := probeResolver(context.Background(), scanTarget{
 		IP:     netip.MustParseAddr("127.0.0.1"),
 		Prefix: "127.0.0.1/32",
-	}, 500*time.Millisecond, port, ProtocolUDP, configuredRecursionDomain(""), configuredStabilityDomains(nil))
+	}, 500*time.Millisecond, port, domain, 0, 2)
 	if !ok {
-		t.Fatal("expected dns host to be reachable")
+		t.Fatal("expected resolver to be reachable")
 	}
 	if !resolver.DNSReachable {
 		t.Fatal("expected DNSReachable to be true")
 	}
-	if resolver.RecursionAvailable {
-		t.Fatal("expected RecursionAvailable to be false")
+	if resolver.TunnelScore != 6 {
+		t.Fatalf("expected tunnel score 6, got %d", resolver.TunnelScore)
 	}
-	if resolver.RecursionAdvertised {
-		t.Fatal("expected RecursionAdvertised to be false")
+	if !resolver.TunnelNSSupport || !resolver.TunnelTXTSupport || !resolver.TunnelRandomSub || !resolver.TunnelRealism || !resolver.TunnelEDNS0Support || !resolver.TunnelNXDOMAIN {
+		t.Fatalf("expected all tunnel checks to pass: %#v", resolver)
 	}
-	if resolver.Stable {
-		t.Fatal("expected Stable to be false")
-	}
-	if resolver.ResponseCode != "REFUSED" {
-		t.Fatalf("expected response code REFUSED, got %q", resolver.ResponseCode)
-	}
-}
-
-func TestProbeResolverMarksStableRecursiveResolvers(t *testing.T) {
-	port, shutdown := startTestDNSServer(t, func(w dns.ResponseWriter, r *dns.Msg) {
-		reply := new(dns.Msg)
-		reply.SetReply(r)
-		if r.RecursionDesired {
-			reply.RecursionAvailable = true
-			reply.Answer = []dns.RR{
-				&dns.A{
-					Hdr: dns.RR_Header{
-						Name:   r.Question[0].Name,
-						Rrtype: dns.TypeA,
-						Class:  dns.ClassINET,
-						Ttl:    300,
-					},
-					A: net.ParseIP("93.184.216.34").To4(),
-				},
-			}
-		} else {
-			reply.Rcode = dns.RcodeRefused
-			reply.RecursionAvailable = false
-		}
-		_ = w.WriteMsg(reply)
-	})
-	defer shutdown()
-
-	resolver, ok := probeResolver(context.Background(), scanTarget{
-		IP:     netip.MustParseAddr("127.0.0.1"),
-		Prefix: "127.0.0.1/32",
-	}, 500*time.Millisecond, port, ProtocolUDP, configuredRecursionDomain(""), configuredStabilityDomains(nil))
-	if !ok {
-		t.Fatal("expected dns host to be reachable")
+	if resolver.TunnelEDNSMaxPayload != 1232 {
+		t.Fatalf("expected max EDNS payload 1232, got %d", resolver.TunnelEDNSMaxPayload)
 	}
 	if !resolver.RecursionAvailable {
-		t.Fatal("expected RecursionAvailable to be true")
-	}
-	if !resolver.RecursionAdvertised {
-		t.Fatal("expected RecursionAdvertised to be true")
+		t.Fatal("expected resolver to qualify for DNSTT")
 	}
 	if !resolver.Stable {
-		t.Fatal("expected Stable to be true")
+		t.Fatal("expected fully compatible resolver to be marked stable")
 	}
-	if resolver.ResponseCode != "NOERROR" {
-		t.Fatalf("expected response code NOERROR, got %q", resolver.ResponseCode)
-	}
-}
-
-func TestProbeResolverMarksUnstableRecursiveResolvers(t *testing.T) {
-	port, shutdown := startTestDNSServer(t, func(w dns.ResponseWriter, r *dns.Msg) {
-		reply := new(dns.Msg)
-		reply.SetReply(r)
-		if r.RecursionDesired {
-			reply.RecursionAvailable = true
-			switch r.Question[0].Name {
-			case "google.com.":
-				reply.Answer = []dns.RR{
-					&dns.A{
-						Hdr: dns.RR_Header{
-							Name:   "google.com.",
-							Rrtype: dns.TypeA,
-							Class:  dns.ClassINET,
-							Ttl:    300,
-						},
-						A: net.ParseIP("8.8.8.8").To4(),
-					},
-				}
-			default:
-				reply.Rcode = dns.RcodeNameError
-			}
-		} else {
-			reply.Rcode = dns.RcodeRefused
-		}
-		_ = w.WriteMsg(reply)
-	})
-	defer shutdown()
-
-	resolver, ok := probeResolver(context.Background(), scanTarget{
-		IP:     netip.MustParseAddr("127.0.0.1"),
-		Prefix: "127.0.0.1/32",
-	}, 500*time.Millisecond, port, ProtocolUDP, configuredRecursionDomain(""), []string{"github.com.", "example.com."})
-	if !ok {
-		t.Fatal("expected dns host to be reachable")
-	}
-	if !resolver.RecursionAvailable {
-		t.Fatal("expected RecursionAvailable to be true")
-	}
-	if resolver.Stable {
-		t.Fatal("expected Stable to be false")
+	if resolver.Transport != string(ProtocolUDP) {
+		t.Fatalf("expected transport %q, got %q", ProtocolUDP, resolver.Transport)
 	}
 }
 
-func TestProbeResolverUsesProvidedStabilityDomainsWithoutFallback(t *testing.T) {
-	port, shutdown := startTestDNSServer(t, func(w dns.ResponseWriter, r *dns.Msg) {
-		reply := new(dns.Msg)
-		reply.SetReply(r)
-		if r.RecursionDesired {
-			reply.RecursionAvailable = true
-			if r.Question[0].Name == "google.com." {
-				reply.Answer = []dns.RR{
-					&dns.A{
-						Hdr: dns.RR_Header{
-							Name:   "google.com.",
-							Rrtype: dns.TypeA,
-							Class:  dns.ClassINET,
-							Ttl:    300,
-						},
-						A: net.ParseIP("8.8.8.8").To4(),
-					},
-				}
-			} else {
-				reply.Rcode = dns.RcodeNameError
-			}
-		} else {
-			reply.Rcode = dns.RcodeRefused
-		}
-		_ = w.WriteMsg(reply)
-	})
-	defer shutdown()
+func TestScanTracksWorkingCompatibleAndQualifiedCounts(t *testing.T) {
+	const domain = "tun.example.com."
 
-	resolver, ok := probeResolver(context.Background(), scanTarget{
-		IP:     netip.MustParseAddr("127.0.0.1"),
-		Prefix: "127.0.0.1/32",
-	}, 500*time.Millisecond, port, ProtocolUDP, configuredRecursionDomain(""), []string{})
-	if !ok {
-		t.Fatal("expected dns host to be reachable")
-	}
-	if !resolver.RecursionAvailable {
-		t.Fatal("expected RecursionAvailable to be true")
-	}
-	if !resolver.Stable {
-		t.Fatal("expected Stable to be true when no stability domains are provided")
-	}
-}
-
-func TestScanTracksReachableAndRecursiveCounts(t *testing.T) {
-	port, shutdown := startTestDNSServer(t, func(w dns.ResponseWriter, r *dns.Msg) {
-		reply := new(dns.Msg)
-		reply.SetReply(r)
-		if r.RecursionDesired {
-			reply.RecursionAvailable = true
-			reply.Answer = []dns.RR{
-				&dns.A{
-					Hdr: dns.RR_Header{
-						Name:   r.Question[0].Name,
-						Rrtype: dns.TypeA,
-						Class:  dns.ClassINET,
-						Ttl:    300,
-					},
-					A: net.ParseIP("93.184.216.34").To4(),
-				},
-			}
-		} else {
-			reply.Rcode = dns.RcodeRefused
-		}
-		_ = w.WriteMsg(reply)
-	})
+	port, shutdown := startTestDNSServer(t, fullyCompatibleHandler(domain))
 	defer shutdown()
 
 	result, err := Scan(context.Background(), model.Operator{Name: "Test"}, []model.PrefixEntry{
 		{Prefix: "127.0.0.1/32", ScanHosts: 1},
 	}, Config{
-		Workers:         1,
-		Timeout:         500 * time.Millisecond,
-		HostLimit:       0,
-		Port:            port,
-		RecursionDomain: "google.com.",
+		Workers:        1,
+		Timeout:        500 * time.Millisecond,
+		Port:           port,
+		Domain:         domain,
+		ScoreThreshold: 2,
 	}, nil)
 	if err != nil {
 		t.Fatalf("Scan returned error: %v", err)
@@ -220,101 +71,20 @@ func TestScanTracksReachableAndRecursiveCounts(t *testing.T) {
 	if result.ScannedTargets != 1 {
 		t.Fatalf("expected 1 scanned target, got %d", result.ScannedTargets)
 	}
-	if result.ReachableCount != 1 {
-		t.Fatalf("expected 1 reachable host, got %d", result.ReachableCount)
+	if result.WorkingCount != 1 || result.CompatibleCount != 1 || result.QualifiedCount != 1 {
+		t.Fatalf("unexpected counts: working=%d compatible=%d qualified=%d", result.WorkingCount, result.CompatibleCount, result.QualifiedCount)
 	}
-	if result.RecursiveCount != 1 {
-		t.Fatalf("expected 1 recursive host, got %d", result.RecursiveCount)
-	}
-	if len(result.Resolvers) != 1 {
-		t.Fatalf("expected 1 result row, got %d", len(result.Resolvers))
-	}
-	if !result.Resolvers[0].Stable {
-		t.Fatal("expected scan result to be marked stable")
-	}
-	if result.Resolvers[0].Transport != string(ProtocolUDP) {
-		t.Fatalf("expected resolver transport %q, got %q", ProtocolUDP, result.Resolvers[0].Transport)
-	}
-	if result.Port != port {
-		t.Fatalf("expected scan port %d, got %d", port, result.Port)
+	if result.ReachableCount != 1 || result.RecursiveCount != 1 {
+		t.Fatalf("unexpected compatibility aliases: reachable=%d recursive=%d", result.ReachableCount, result.RecursiveCount)
 	}
 	if result.Protocol != string(ProtocolUDP) {
-		t.Fatalf("expected scan protocol %q, got %q", ProtocolUDP, result.Protocol)
+		t.Fatalf("expected protocol %q, got %q", ProtocolUDP, result.Protocol)
 	}
-}
-
-func TestProbeResolverSupportsTCP(t *testing.T) {
-	port, shutdown := startTestDNSServerTCP(t, func(w dns.ResponseWriter, r *dns.Msg) {
-		reply := new(dns.Msg)
-		reply.SetReply(r)
-		if r.RecursionDesired {
-			reply.RecursionAvailable = true
-			reply.Answer = []dns.RR{
-				&dns.A{
-					Hdr: dns.RR_Header{
-						Name:   r.Question[0].Name,
-						Rrtype: dns.TypeA,
-						Class:  dns.ClassINET,
-						Ttl:    300,
-					},
-					A: net.ParseIP("93.184.216.34").To4(),
-				},
-			}
-		} else {
-			reply.Rcode = dns.RcodeRefused
-		}
-		_ = w.WriteMsg(reply)
-	})
-	defer shutdown()
-
-	resolver, ok := probeResolver(context.Background(), scanTarget{
-		IP:     netip.MustParseAddr("127.0.0.1"),
-		Prefix: "127.0.0.1/32",
-	}, 500*time.Millisecond, port, ProtocolTCP, configuredRecursionDomain(""), configuredStabilityDomains(nil))
-	if !ok {
-		t.Fatal("expected dns host to be reachable over TCP")
+	if result.TunnelDomain != "tun.example.com" {
+		t.Fatalf("unexpected tunnel domain %q", result.TunnelDomain)
 	}
-	if resolver.Transport != string(ProtocolTCP) {
-		t.Fatalf("expected transport %q, got %q", ProtocolTCP, resolver.Transport)
-	}
-	if !resolver.RecursionAvailable {
-		t.Fatal("expected recursive lookup to succeed over TCP")
-	}
-}
-
-func TestProbeResolverBothFallsBackToTCP(t *testing.T) {
-	port, shutdown := startTestDNSServerTCP(t, func(w dns.ResponseWriter, r *dns.Msg) {
-		reply := new(dns.Msg)
-		reply.SetReply(r)
-		if r.RecursionDesired {
-			reply.RecursionAvailable = true
-			reply.Answer = []dns.RR{
-				&dns.A{
-					Hdr: dns.RR_Header{
-						Name:   r.Question[0].Name,
-						Rrtype: dns.TypeA,
-						Class:  dns.ClassINET,
-						Ttl:    300,
-					},
-					A: net.ParseIP("93.184.216.34").To4(),
-				},
-			}
-		} else {
-			reply.Rcode = dns.RcodeRefused
-		}
-		_ = w.WriteMsg(reply)
-	})
-	defer shutdown()
-
-	resolver, ok := probeResolver(context.Background(), scanTarget{
-		IP:     netip.MustParseAddr("127.0.0.1"),
-		Prefix: "127.0.0.1/32",
-	}, 500*time.Millisecond, port, ProtocolBoth, configuredRecursionDomain(""), configuredStabilityDomains(nil))
-	if !ok {
-		t.Fatal("expected dns host to be reachable when BOTH is selected")
-	}
-	if resolver.Transport != string(ProtocolTCP) {
-		t.Fatalf("expected BOTH mode to fall back to TCP, got %q", resolver.Transport)
+	if len(result.Resolvers) != 1 || result.Resolvers[0].TunnelScore != 6 {
+		t.Fatalf("unexpected scan results: %#v", result.Resolvers)
 	}
 }
 
@@ -327,6 +97,7 @@ func TestScanWaitsForProgressEmitterBeforeReturning(t *testing.T) {
 		_, _ = Scan(context.Background(), model.Operator{Name: "Test"}, nil, Config{
 			Workers: 1,
 			Timeout: 50 * time.Millisecond,
+			Domain:  "tun.example.com.",
 		}, func(event Event) {
 			if event.Type != EventProgress {
 				return
@@ -383,49 +154,57 @@ func TestNormalizeProbeDomain(t *testing.T) {
 	}
 }
 
-func TestProbeResolverUsesConfiguredRecursionDomain(t *testing.T) {
-	port, shutdown := startTestDNSServer(t, func(w dns.ResponseWriter, r *dns.Msg) {
-		reply := new(dns.Msg)
-		reply.SetReply(r)
-		if r.RecursionDesired {
-			reply.RecursionAvailable = true
-			if r.Question[0].Name == "resolver-test.example." {
-				reply.Answer = []dns.RR{
-					&dns.A{
-						Hdr: dns.RR_Header{
-							Name:   "resolver-test.example.",
-							Rrtype: dns.TypeA,
-							Class:  dns.ClassINET,
-							Ttl:    300,
-						},
-						A: net.ParseIP("93.184.216.34").To4(),
-					},
-				}
-			} else {
-				reply.Rcode = dns.RcodeNameError
-			}
-		} else {
-			reply.Rcode = dns.RcodeRefused
-		}
-		_ = w.WriteMsg(reply)
-	})
-	defer shutdown()
-
-	resolver, ok := probeResolver(context.Background(), scanTarget{
-		IP:     netip.MustParseAddr("127.0.0.1"),
-		Prefix: "127.0.0.1/32",
-	}, 500*time.Millisecond, port, ProtocolUDP, "resolver-test.example.", []string{})
-	if !ok {
-		t.Fatal("expected dns host to be reachable")
+func TestTunnelRealismPayloadHonorsQueryBudget(t *testing.T) {
+	if got := tunnelRealismPayload(0, "tun.example.com."); got != 100 {
+		t.Fatalf("expected default tunnel realism payload 100, got %d", got)
 	}
-	if !resolver.RecursionAvailable {
-		t.Fatal("expected RecursionAvailable to be true for configured recursion domain")
+	if got := tunnelRealismPayload(80, "tun.example.com."); got <= 0 || got > 100 {
+		t.Fatalf("unexpected bounded tunnel realism payload %d", got)
 	}
 }
 
-func TestConfiguredRecursionDomainFallsBackToDefault(t *testing.T) {
-	if got := configuredRecursionDomain(""); got != defaultRecursionDomain {
-		t.Fatalf("configuredRecursionDomain(\"\") = %q, want %q", got, defaultRecursionDomain)
+func fullyCompatibleHandler(domain string) dns.HandlerFunc {
+	trimmedDomain := strings.TrimSuffix(domain, ".")
+	parent := getParentDomain(domain) + "."
+	nsHost := "ns." + parent
+
+	return func(w dns.ResponseWriter, r *dns.Msg) {
+		reply := new(dns.Msg)
+		reply.SetReply(r)
+
+		name := r.Question[0].Name
+		switch {
+		case strings.HasSuffix(name, ".invalid."):
+			reply.Rcode = dns.RcodeNameError
+		case r.Question[0].Qtype == dns.TypeNS && name == parent:
+			reply.Answer = []dns.RR{
+				&dns.NS{Hdr: dns.RR_Header{Name: name, Rrtype: dns.TypeNS, Class: dns.ClassINET, Ttl: 300}, Ns: nsHost},
+			}
+		case r.Question[0].Qtype == dns.TypeA && name == nsHost:
+			reply.Answer = []dns.RR{
+				&dns.A{Hdr: dns.RR_Header{Name: name, Rrtype: dns.TypeA, Class: dns.ClassINET, Ttl: 300}, A: net.ParseIP("203.0.113.7").To4()},
+			}
+		case r.Question[0].Qtype == dns.TypeTXT:
+			reply.Answer = []dns.RR{
+				&dns.TXT{Hdr: dns.RR_Header{Name: name, Rrtype: dns.TypeTXT, Class: dns.ClassINET, Ttl: 60}, Txt: []string{"ok"}},
+			}
+		default:
+			reply.Answer = []dns.RR{
+				&dns.A{Hdr: dns.RR_Header{Name: name, Rrtype: dns.TypeA, Class: dns.ClassINET, Ttl: 300}, A: net.ParseIP("93.184.216.34").To4()},
+			}
+		}
+
+		if strings.HasSuffix(name, "."+trimmedDomain+".") || strings.HasSuffix(name, "."+parent) || name == parent {
+			reply.RecursionAvailable = true
+		}
+		if opt := r.IsEdns0(); opt != nil {
+			reply.Extra = append(reply.Extra, &dns.OPT{
+				Hdr: dns.RR_Header{Name: ".", Rrtype: dns.TypeOPT},
+			})
+			_ = opt
+		}
+
+		_ = w.WriteMsg(reply)
 	}
 }
 
@@ -448,40 +227,6 @@ func startTestDNSServer(t *testing.T, handler dns.HandlerFunc) (int, func()) {
 	}()
 
 	port := conn.LocalAddr().(*net.UDPAddr).Port
-	shutdown := func() {
-		_ = server.Shutdown()
-		select {
-		case err := <-errCh:
-			if err != nil && !errors.Is(err, net.ErrClosed) && !strings.Contains(err.Error(), "closed network connection") {
-				t.Fatalf("dns server returned error: %v", err)
-			}
-		case <-time.After(500 * time.Millisecond):
-			t.Fatal("timed out waiting for dns server shutdown")
-		}
-	}
-
-	return port, shutdown
-}
-
-func startTestDNSServerTCP(t *testing.T, handler dns.HandlerFunc) (int, func()) {
-	t.Helper()
-
-	listener, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("Listen returned error: %v", err)
-	}
-
-	server := &dns.Server{
-		Listener: listener,
-		Handler:  handler,
-	}
-
-	errCh := make(chan error, 1)
-	go func() {
-		errCh <- server.ActivateAndServe()
-	}()
-
-	port := listener.Addr().(*net.TCPAddr).Port
 	shutdown := func() {
 		_ = server.Shutdown()
 		select {

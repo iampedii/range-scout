@@ -25,7 +25,7 @@
    - `stable` if both probe sites resolve successfully
 5. Optionally runs a DNSTT pass only on healthy recursive resolvers from the latest scan:
    - `tunnel` when the TXT-based tunnel precheck succeeds
-   - `e2e` when `dnstt-client` is available and the full tunnel works with your pubkey
+   - `e2e` when the embedded DNSTT runtime starts and the full tunnel works with your pubkey
 
 ## Build
 
@@ -58,8 +58,8 @@ That writes `dist/range-scout-windows-amd64.exe`.
 The git tag is the release source of truth. This matches a normal GitFlow
 process:
 
-- tag `v0.1.5` for a final release
-- tag `v0.1.5-rc1` or `v0.1.5-rc2` for release candidates
+- tag `v0.1.6` for a final release
+- tag `v0.1.6-rc1` or `v0.1.6-rc2` for release candidates
 
 To build a release artifact from the current tag:
 
@@ -75,7 +75,7 @@ make release-windows
 
 Release builds are intentionally strict:
 
-- `HEAD` must be exactly on a tag such as `v0.1.5` or `v0.1.5-rc1`
+- `HEAD` must be exactly on a tag such as `v0.1.6` or `v0.1.6-rc1`
 - the git worktree must be clean
 
 If those checks pass, the artifact filename will match the release tag exactly.
@@ -107,15 +107,13 @@ Example:
 ```json
 {
   "importConfig": {
-    "importFilePaths": {
-      "default": "targets/default.txt"
-    }
+    "importFilePaths": {}
   },
   "scanConfig": {
     "workers": "256",
-    "timeoutMS": "1200",
+    "timeoutMS": "15000",
     "port": "53",
-    "protocol": "udp",
+    "protocol": "UDP",
     "recursionHost": "google.com",
     "probeHost1": "github.com",
     "probeHost2": "example.com"
@@ -123,10 +121,12 @@ Example:
   "dnsttConfig": {
     "domain": "t.example.com",
     "pubkey": "",
-    "timeoutMS": "3000",
+    "timeoutMS": "15000",
     "e2eTimeoutS": "20",
     "querySize": "",
-    "e2ePort": "53"
+    "scoreThreshold": "2",
+    "e2eURL": "http://www.gstatic.com/generate_204",
+    "testNearbyIPs": "No"
   }
 }
 ```
@@ -135,11 +135,12 @@ Notes:
 
 - `importFilePaths` may be a single string or an object map.
 - The app writes UI field values back as strings when you use `Save Config`.
+- The current UI reads and writes these startup fields: `workers`, `timeoutMS`, `port`, `protocol`, `recursionHost`, `probeHost1`, `probeHost2`, `domain`, `pubkey`, `timeoutMS`, `e2eTimeoutS`, `querySize`, `scoreThreshold`, `e2eURL`, and `testNearbyIPs`.
 - Use `"default"` to provide a fallback import path for any operator.
 - Relative import paths are resolved relative to the `config.json` directory.
 - `Save Config` keeps import paths relative to the config file when possible, so shared configs stay portable.
 - The config file sets startup defaults; it does not auto-run imports, scans, or DNSTT.
-- Ask bug reporters to include the version shown in the header, for example `v0.1.5`.
+- Ask bug reporters to include the version shown in the header, for example `v0.1.6-rc1`.
 
 ## Quick Guide
 
@@ -151,8 +152,8 @@ Notes:
 6. Set the port, protocol, recursion host, and probe hosts.
    Enter hostnames only, without `http://` or `https://`.
 7. Click `Start Scan`.
-8. If you want DNSTT validation, set `DNSTT Domain`. Leave `DNSTT Pubkey` empty for tunnel-only checks, or set it for full end-to-end validation. `E2E Port` defaults to `53`, and the final `SOCKS5 CONNECT` target is the resolver IP currently being tested on that port.
-9. Leave `Query Size` empty unless you specifically want to pass `-mtu` to `dnstt-client` and your installed binary supports it.
+8. If you want DNSTT validation, set `DNSTT Domain`. Leave `DNSTT Pubkey` empty for tunnel-only checks, or set it for full end-to-end validation. `E2E URL` defaults to `http://www.gstatic.com/generate_204`, matching SlipNet's HTTP probe.
+9. Leave `Query Size` empty unless you specifically want to cap the embedded DNSTT query payload size.
 10. Click `Test DNSTT` after the scan to open the dedicated DNSTT setup screen. The flow is `Load Targets -> DNS Scan -> DNSTT E2E`.
 11. Click `Export` if you want to save scan results.
 12. In target mode, `Save Targets` uses the `cidr-<label>` filename prefix.
@@ -184,8 +185,8 @@ What to do:
 7. Set `Recursion Host` to an outside hostname you want to use for the first recursive lookup check.
 8. Set probe hosts that are accessible from the restricted network you care about. These probes are used to judge stable recursive resolution.
 9. If you want DNSTT validation, set `DNSTT Domain`. Leave `DNSTT Pubkey` empty if you only want the tunnel precheck. Set `DNSTT Pubkey` if you want a full end-to-end DNSTT check.
-10. `E2E Port` controls the final `SOCKS5 CONNECT` request used for the DNSTT e2e check. The app uses the scanned resolver IP as the host and this port as the destination.
-11. Leave `Query Size` empty or `0` unless your `dnstt-client` build supports the `-mtu` flag.
+10. `E2E URL` is fetched through the local SOCKS5 proxy after the embedded DNSTT runtime starts. The request must return an HTTP status in the `2xx` or `3xx` range to pass.
+11. Leave `Query Size` empty or `0` unless you specifically want smaller DNSTT queries.
 12. Run the scan first, then use `Test DNSTT` to open the dedicated DNSTT screen and start the DNSTT stage there.
 13. Export the results you want to keep. Export filenames are stage-specific:
     `cidr-<label>`, `dns-scan-success-<label>`, `dns-scan-failures-<label>`, and `dnstt-scan-success-<label>`.
@@ -194,9 +195,8 @@ Important:
 
 - This tool helps you get available IPs and candidate DNS resolvers.
 - DNSTT checks only run against healthy recursive resolvers from the latest scan.
-- End-to-end DNSTT validation requires `dnstt-client` to be available in `PATH`, in the current directory, or next to the `range-scout` binary.
-- The e2e check uses a no-auth SOCKS5 probe, matching the `findns` approach. The target is `<resolver IP>:<E2E Port>`, and success means a valid SOCKS5 `CONNECT` reply came back through the tunnel.
-- `range-scout` also checks common release-style names such as `dnstt-client-linux`, `dnstt-client-darwin`, and `dnstt-client.exe`, and shows a warning in the scanner view when `Pubkey` is set but the client is missing.
+- End-to-end DNSTT validation now uses an embedded runtime inside `range-scout`; no separate `dnstt-client` binary is required.
+- The e2e check follows SlipNet's HTTP-style verification. After the embedded DNSTT runtime starts a local SOCKS5 proxy, the app fetches `E2E URL` through that proxy and treats HTTP `2xx` or `3xx` as success.
 - A positive result here still does not guarantee that every real-world client or route will behave the same way on your network.
 
 ## Shortcuts
@@ -245,8 +245,8 @@ Important:
 6. در فیلد `Recursion Host` فقط نام هاست را بدون `http://` یا `https://` وارد کنید و برای اولین تست recursive lookup از یک هاست بیرون از شبکه محدود استفاده کنید.
 7. برای `Probe Host`ها نام‌هایی را وارد کنید که از داخل شبکه محدود مورد نظر شما واقعا قابل دسترس باشند. این آدرس‌ها برای تشخیص stable recursive resolution استفاده می‌شوند.
 8. اگر تست `DNSTT` می‌خواهید، `DNSTT Domain` را وارد کنید. اگر فقط precheck می‌خواهید، `DNSTT Pubkey` را خالی بگذارید. اگر تست کامل end-to-end می‌خواهید، `DNSTT Pubkey` را هم وارد کنید.
-9. فیلد `E2E Port` مشخص می‌کند برنامه در انتهای تست `SOCKS5 CONNECT` از چه پورتی روی همان resolver در حال تست استفاده کند. مقدار پیش‌فرض `53` است.
-10. فیلد `Query Size` را خالی بگذارید مگر این که مطمئن باشید باینری `dnstt-client` شما از `-mtu` پشتیبانی می‌کند.
+9. فیلد `E2E URL` مشخص می‌کند بعد از بالا آمدن پراکسی `SOCKS5` محلی، چه آدرس `HTTP/HTTPS` از داخل تانل درخواست شود. مقدار پیش‌فرض `http://www.gstatic.com/generate_204` است.
+10. فیلد `Query Size` را خالی بگذارید مگر این که بخواهید اندازه payload پرس‌وجوهای DNSTT را کمتر کنید.
 11. اول اسکن را اجرا کنید، بعد `Test DNSTT` را بزنید.
 12. در پایان نتیجه‌ها را خروجی بگیرید.
 
@@ -254,7 +254,6 @@ Important:
 
 - این ابزار برای پیدا کردن IPهای در دسترس و resolverهای کاندید است.
 - تست `DNSTT` فقط روی resolverهای سالم مرحله قبل اجرا می‌شود، نه روی همه هاست‌ها.
-- برای تست کامل end-to-end باید `dnstt-client` در `PATH`، پوشه فعلی، یا کنار باینری `range-scout` در دسترس باشد.
-- تست end-to-end با یک پروب `SOCKS5` بدون auth انجام می‌شود و با رفتار `findns` هماهنگ است؛ مقصد آن هم `<resolver IP>:<E2E Port>` است و موفقیت یعنی یک پاسخ معتبر `SOCKS5 CONNECT` از داخل تانل برگشته باشد.
-- برنامه نام‌های رایج فایل release مثل `dnstt-client-linux` و `dnstt-client-darwin` و `dnstt-client.exe` را هم پیدا می‌کند و اگر `Pubkey` تنظیم شده باشد ولی کلاینت پیدا نشود، در صفحه اسکن هشدار نشان می‌دهد.
+- برای تست کامل end-to-end دیگر به باینری جداگانه `dnstt-client` نیاز نیست و runtime به‌صورت embedded داخل برنامه اجرا می‌شود.
+- تست end-to-end حالا مثل SlipNet با یک درخواست `HTTP/HTTPS` از داخل پراکسی `SOCKS5` محلی انجام می‌شود و پاسخ موفق یعنی کد وضعیت `2xx` یا `3xx` از `E2E URL` برگشته باشد.
 - مثبت بودن نتیجه در این برنامه باز هم تضمین کامل برای همه مسیرهای واقعی شبکه شما نیست.

@@ -1,42 +1,42 @@
 package dnstt
 
 import (
-	"bytes"
 	"context"
-	"errors"
 	"fmt"
-	"io"
 	"math/rand"
 	"net"
-	"os"
-	"os/exec"
-	"path/filepath"
-	"runtime"
+	"net/http"
+	"net/netip"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 
 	"github.com/miekg/dns"
+	"golang.org/x/net/proxy"
 
+	embed "range-scout/internal/dnsttembed"
 	"range-scout/internal/model"
 )
 
 const (
 	defaultEDNSBufSize = 1232
 	localSocksBasePort = 10800
+	DefaultE2ETestURL  = "http://www.gstatic.com/generate_204"
 )
 
 type Config struct {
-	Workers    int
-	Timeout    time.Duration
-	E2ETimeout time.Duration
-	Port       int
-	Domain     string
-	Pubkey     string
-	QuerySize  int
-	E2EPort    int
-	BinaryPath string
+	Workers        int
+	Timeout        time.Duration
+	E2ETimeout     time.Duration
+	Port           int
+	Domain         string
+	Pubkey         string
+	QuerySize      int
+	E2EURL         string
+	ScoreThreshold int
+	TestNearbyIPs  bool
+	BasePrefixes   []string
 }
 
 type Summary struct {
@@ -65,24 +65,41 @@ type Event struct {
 	Summary Summary
 }
 
+type embeddedClient interface {
+	SetAuthoritativeMode(bool)
+	SetMaxPayload(int)
+	Start() error
+	Stop()
+	IsRunning() bool
+}
+
+var newEmbeddedClient = func(dnsAddr, tunnelDomain, publicKey, listenAddr string) (embeddedClient, error) {
+	return embed.NewClient(dnsAddr, tunnelDomain, publicKey, listenAddr)
+}
+
+var runTunnelCheck = tunnelCheck
+
 func Test(
 	ctx context.Context,
 	resolvers []model.Resolver,
 	cfg Config,
 	emit func(Event),
 ) ([]model.Resolver, Summary, error) {
-	cfg, binaryPath, candidates, err := prepareConfig(resolvers, cfg)
+	cfg, candidates, err := prepareConfig(resolvers, cfg)
 	if err != nil {
 		return nil, Summary{}, err
 	}
 
 	updated := append([]model.Resolver(nil), resolvers...)
+	for index, resolver := range updated {
+		updated[index] = resetResolverState(resolver)
+	}
 	summary := Summary{
 		Candidates: uint64(len(candidates)),
 		StartedAt:  time.Now(),
 	}
+	basePrefixes := parseBasePrefixes(cfg.BasePrefixes, updated)
 
-	jobs := make(chan int, len(candidates))
 	var tested atomic.Uint64
 	var tunnelOK atomic.Uint64
 	var e2eOK atomic.Uint64
@@ -94,7 +111,148 @@ func Test(
 		}
 	}
 
-	for _, index := range candidates {
+	runCandidateBatch(ctx, updated, candidates, cfg, portPool, summary.Candidates, &tested, &tunnelOK, &e2eOK, summary.StartedAt, emit)
+
+	if ctx.Err() == nil && cfg.TestNearbyIPs {
+		nearbyResolvers := collectNearbyResolvers(updated, candidates, strings.TrimSpace(cfg.Pubkey) != "", basePrefixes)
+		if len(nearbyResolvers) > 0 {
+			startIndex := len(updated)
+			updated = append(updated, nearbyResolvers...)
+
+			nearbyIndexes := make([]int, 0, len(nearbyResolvers))
+			for index := range nearbyResolvers {
+				nearbyIndexes = append(nearbyIndexes, startIndex+index)
+			}
+			summary.Candidates += uint64(len(nearbyIndexes))
+			emitProgress(emit, summary.Candidates, tested.Load(), tunnelOK.Load(), e2eOK.Load(), summary.StartedAt)
+			runCandidateBatch(ctx, updated, nearbyIndexes, cfg, portPool, summary.Candidates, &tested, &tunnelOK, &e2eOK, summary.StartedAt, emit)
+		}
+	}
+
+	summary.Checked = tested.Load()
+	summary.TunnelOK = tunnelOK.Load()
+	summary.E2EOK = e2eOK.Load()
+	summary.FinishedAt = time.Now()
+
+	if errorsIsCanceled(ctx) {
+		return updated, summary, ctx.Err()
+	}
+	return updated, summary, nil
+}
+
+func EligibleResolvers(resolvers []model.Resolver, scoreThreshold int) []int {
+	indexes := make([]int, 0, len(resolvers))
+	scoreThreshold = normalizeScoreThreshold(scoreThreshold)
+	for index, resolver := range resolvers {
+		if resolver.TunnelScore >= scoreThreshold {
+			indexes = append(indexes, index)
+		}
+	}
+	return indexes
+}
+
+func prepareConfig(resolvers []model.Resolver, cfg Config) (Config, []int, error) {
+	if cfg.Workers <= 0 {
+		cfg.Workers = 4
+	}
+	if cfg.Timeout <= 0 {
+		return Config{}, nil, fmt.Errorf("dnstt timeout must be greater than zero")
+	}
+	if cfg.Port <= 0 {
+		cfg.Port = 53
+	}
+	cfg.Domain = dns.Fqdn(strings.TrimSpace(cfg.Domain))
+	if cfg.Domain == "." {
+		return Config{}, nil, fmt.Errorf("dnstt domain is required")
+	}
+	if cfg.QuerySize < 0 {
+		return Config{}, nil, fmt.Errorf("dnstt query size must be zero or greater")
+	}
+	cfg.ScoreThreshold = normalizeScoreThreshold(cfg.ScoreThreshold)
+
+	candidates := EligibleResolvers(resolvers, cfg.ScoreThreshold)
+	if len(candidates) == 0 {
+		return Config{}, nil, fmt.Errorf("no compatible resolvers are available for DNSTT testing")
+	}
+
+	if strings.TrimSpace(cfg.Pubkey) != "" {
+		if cfg.E2ETimeout <= 0 {
+			return Config{}, nil, fmt.Errorf("dnstt e2e timeout must be greater than zero")
+		}
+		cfg.E2EURL = strings.TrimSpace(cfg.E2EURL)
+		if cfg.E2EURL == "" {
+			cfg.E2EURL = DefaultE2ETestURL
+		}
+		request, err := http.NewRequest(http.MethodGet, cfg.E2EURL, nil)
+		if err != nil || request.URL == nil || request.URL.Host == "" {
+			return Config{}, nil, fmt.Errorf("dnstt e2e url must be a valid http or https URL")
+		}
+		if request.URL.Scheme != "http" && request.URL.Scheme != "https" {
+			return Config{}, nil, fmt.Errorf("dnstt e2e url must use http or https")
+		}
+	}
+
+	return cfg, candidates, nil
+}
+
+func runResolverCheck(ctx context.Context, resolver model.Resolver, cfg Config, ports chan int) model.Resolver {
+	resolver = resetResolverState(resolver)
+	resolver.DNSTTChecked = true
+
+	if strings.TrimSpace(cfg.Pubkey) == "" {
+		tunnelOK, tunnelMS, tunnelErr := runTunnelCheck(ctx, resolver.IP, cfg.Port, cfg.Domain, cfg.Timeout)
+		if tunnelMS > 0 {
+			resolver.DNSTTTunnelMillis = tunnelMS
+		}
+		if tunnelErr != nil {
+			resolver.DNSTTError = tunnelErr.Error()
+			return resolver
+		}
+		if !tunnelOK {
+			resolver.DNSTTError = "dnstt tunnel precheck failed"
+			return resolver
+		}
+		resolver.DNSTTTunnelOK = true
+		return resolver
+	}
+
+	e2eOK, tunnelMS, e2eMS, e2eErr := dnsttCheck(ctx, resolver.IP, cfg.Port, cfg.Domain, cfg.Pubkey, cfg.E2ETimeout, cfg.QuerySize, cfg.E2EURL, ports)
+	if tunnelMS > 0 {
+		resolver.DNSTTTunnelMillis = tunnelMS
+		resolver.DNSTTTunnelOK = true
+	}
+	if e2eMS > 0 {
+		resolver.DNSTTE2EMillis = e2eMS
+	}
+	if e2eErr != nil {
+		resolver.DNSTTError = e2eErr.Error()
+		return resolver
+	}
+	if !e2eOK {
+		resolver.DNSTTError = "dnstt e2e check failed"
+		return resolver
+	}
+
+	resolver.DNSTTE2EOK = true
+	resolver.DNSTTError = ""
+	return resolver
+}
+
+func runCandidateBatch(
+	ctx context.Context,
+	updated []model.Resolver,
+	indexes []int,
+	cfg Config,
+	portPool chan int,
+	total uint64,
+	tested *atomic.Uint64,
+	tunnelOK *atomic.Uint64,
+	e2eOK *atomic.Uint64,
+	startedAt time.Time,
+	emit func(Event),
+) {
+	jobs := make(chan int, len(indexes))
+	for _, index := range indexes {
 		jobs <- index
 	}
 	close(jobs)
@@ -109,7 +267,7 @@ func Test(
 					return
 				}
 
-				resolver := runResolverCheck(ctx, updated[index], cfg, binaryPath, portPool)
+				resolver := runResolverCheck(ctx, updated[index], cfg, portPool)
 				updated[index] = resolver
 
 				currentTested := tested.Add(1)
@@ -121,11 +279,11 @@ func Test(
 				}
 
 				currentSummary := Summary{
-					Candidates: summary.Candidates,
+					Candidates: total,
 					Checked:    currentTested,
 					TunnelOK:   tunnelOK.Load(),
 					E2EOK:      e2eOK.Load(),
-					StartedAt:  summary.StartedAt,
+					StartedAt:  startedAt,
 				}
 
 				if emit != nil {
@@ -133,7 +291,7 @@ func Test(
 					emit(Event{
 						Type:    EventResolver,
 						Tested:  currentTested,
-						Total:   summary.Candidates,
+						Total:   total,
 						Tunnel:  currentSummary.TunnelOK,
 						E2E:     currentSummary.E2EOK,
 						Item:    &copyResolver,
@@ -142,7 +300,7 @@ func Test(
 					emit(Event{
 						Type:    EventProgress,
 						Tested:  currentTested,
-						Total:   summary.Candidates,
+						Total:   total,
 						Tunnel:  currentSummary.TunnelOK,
 						E2E:     currentSummary.E2EOK,
 						Summary: currentSummary,
@@ -153,118 +311,169 @@ func Test(
 	}
 
 	workerWG.Wait()
-
-	summary.Checked = tested.Load()
-	summary.TunnelOK = tunnelOK.Load()
-	summary.E2EOK = e2eOK.Load()
-	summary.FinishedAt = time.Now()
-
-	if errorsIsCanceled(ctx) {
-		return updated, summary, ctx.Err()
-	}
-	return updated, summary, nil
 }
 
-func EligibleResolvers(resolvers []model.Resolver) []int {
-	indexes := make([]int, 0, len(resolvers))
-	for index, resolver := range resolvers {
-		if resolver.RecursionAvailable && resolver.Stable {
-			indexes = append(indexes, index)
-		}
+func emitProgress(emit func(Event), total, tested, tunnel, e2e uint64, startedAt time.Time) {
+	if emit == nil {
+		return
 	}
-	return indexes
+	summary := Summary{
+		Candidates: total,
+		Checked:    tested,
+		TunnelOK:   tunnel,
+		E2EOK:      e2e,
+		StartedAt:  startedAt,
+	}
+	emit(Event{
+		Type:    EventProgress,
+		Tested:  tested,
+		Total:   total,
+		Tunnel:  tunnel,
+		E2E:     e2e,
+		Summary: summary,
+	})
 }
 
-func FindClientBinary() (string, error) {
-	return findBinary("dnstt-client")
-}
-
-func prepareConfig(resolvers []model.Resolver, cfg Config) (Config, string, []int, error) {
-	if cfg.Workers <= 0 {
-		cfg.Workers = 4
-	}
-	if cfg.Timeout <= 0 {
-		return Config{}, "", nil, fmt.Errorf("dnstt timeout must be greater than zero")
-	}
-	if cfg.Port <= 0 {
-		cfg.Port = 53
-	}
-	cfg.Domain = dns.Fqdn(strings.TrimSpace(cfg.Domain))
-	if cfg.Domain == "." {
-		return Config{}, "", nil, fmt.Errorf("dnstt domain is required")
-	}
-	if cfg.QuerySize < 0 {
-		return Config{}, "", nil, fmt.Errorf("dnstt query size must be zero or greater")
+func collectNearbyResolvers(resolvers []model.Resolver, seedIndexes []int, e2eRequested bool, basePrefixes []netip.Prefix) []model.Resolver {
+	seenIPs := make(map[string]struct{}, len(resolvers))
+	for _, resolver := range resolvers {
+		seenIPs[resolver.IP] = struct{}{}
 	}
 
-	candidates := EligibleResolvers(resolvers)
-	if len(candidates) == 0 {
-		return Config{}, "", nil, fmt.Errorf("no healthy recursive resolvers are available for DNSTT testing")
-	}
+	expandedSubnets := make(map[string]struct{})
+	nearby := make([]model.Resolver, 0)
+	for _, index := range seedIndexes {
+		if index < 0 || index >= len(resolvers) {
+			continue
+		}
+		resolver := resolvers[index]
+		if resolver.DNSTTNearby {
+			continue
+		}
+		if !resolverPassed(resolver, e2eRequested) {
+			continue
+		}
 
-	binaryPath := strings.TrimSpace(cfg.BinaryPath)
-	if strings.TrimSpace(cfg.Pubkey) != "" {
-		if cfg.E2ETimeout <= 0 {
-			return Config{}, "", nil, fmt.Errorf("dnstt e2e timeout must be greater than zero")
+		ip, ok := parseIPv4Addr(resolver.IP)
+		if !ok {
+			continue
 		}
-		if cfg.E2EPort <= 0 {
-			cfg.E2EPort = 53
+		if prefixCoverageCount(netip.AddrFrom4(ip), basePrefixes) > 1 {
+			continue
 		}
-		if cfg.E2EPort > 65535 {
-			return Config{}, "", nil, fmt.Errorf("dnstt e2e port must be between 1 and 65535")
+
+		subnetKey, subnetPrefix := subnetForIPv4(ip)
+		if _, ok := expandedSubnets[subnetKey]; ok {
+			continue
 		}
-		if binaryPath == "" {
-			var err error
-			binaryPath, err = findBinary("dnstt-client")
-			if err != nil {
-				return Config{}, "", nil, err
+		expandedSubnets[subnetKey] = struct{}{}
+
+		for lastOctet := 0; lastOctet < 256; lastOctet++ {
+			candidateAddr := netip.AddrFrom4([4]byte{ip[0], ip[1], ip[2], byte(lastOctet)})
+			candidateIP := candidateAddr.String()
+			if _, ok := seenIPs[candidateIP]; ok {
+				continue
 			}
+			if ipCoveredByAnyPrefix(candidateAddr, basePrefixes) {
+				continue
+			}
+			seenIPs[candidateIP] = struct{}{}
+			nearby = append(nearby, model.Resolver{
+				IP:          candidateIP,
+				Prefix:      subnetPrefix,
+				DNSTTNearby: true,
+			})
+		}
+	}
+	return nearby
+}
+
+func parseBasePrefixes(configured []string, resolvers []model.Resolver) []netip.Prefix {
+	rawValues := configured
+	if len(rawValues) == 0 {
+		rawValues = make([]string, 0, len(resolvers))
+		for _, resolver := range resolvers {
+			if resolver.DNSTTNearby {
+				continue
+			}
+			rawValues = append(rawValues, resolver.Prefix)
 		}
 	}
 
-	return cfg, binaryPath, candidates, nil
+	seen := make(map[string]struct{}, len(rawValues))
+	prefixes := make([]netip.Prefix, 0, len(rawValues))
+	for _, raw := range rawValues {
+		prefix, ok := parseBasePrefix(raw)
+		if !ok {
+			continue
+		}
+		key := prefix.String()
+		if _, exists := seen[key]; exists {
+			continue
+		}
+		seen[key] = struct{}{}
+		prefixes = append(prefixes, prefix)
+	}
+	return prefixes
 }
 
-func runResolverCheck(ctx context.Context, resolver model.Resolver, cfg Config, binaryPath string, ports chan int) model.Resolver {
-	resolver.DNSTTChecked = true
+func parseBasePrefix(raw string) (netip.Prefix, bool) {
+	text := strings.TrimSpace(raw)
+	if text == "" {
+		return netip.Prefix{}, false
+	}
+	if prefix, err := netip.ParsePrefix(text); err == nil {
+		return prefix.Masked(), true
+	}
+	if addr, err := netip.ParseAddr(text); err == nil {
+		if addr.Is4() {
+			return netip.PrefixFrom(addr, 32), true
+		}
+		return netip.PrefixFrom(addr, 128), true
+	}
+	return netip.Prefix{}, false
+}
+
+func parseIPv4Addr(raw string) ([4]byte, bool) {
+	addr, err := netip.ParseAddr(strings.TrimSpace(raw))
+	if err != nil || !addr.Is4() {
+		return [4]byte{}, false
+	}
+	return addr.As4(), true
+}
+
+func subnetForIPv4(ip [4]byte) (string, string) {
+	subnet := fmt.Sprintf("%d.%d.%d", ip[0], ip[1], ip[2])
+	return subnet, fmt.Sprintf("%s.0/24", subnet)
+}
+
+func prefixCoverageCount(addr netip.Addr, prefixes []netip.Prefix) int {
+	count := 0
+	for _, prefix := range prefixes {
+		if prefix.Contains(addr) {
+			count++
+		}
+	}
+	return count
+}
+
+func ipCoveredByAnyPrefix(addr netip.Addr, prefixes []netip.Prefix) bool {
+	return prefixCoverageCount(addr, prefixes) > 0
+}
+
+func resolverPassed(resolver model.Resolver, e2eRequested bool) bool {
+	if e2eRequested {
+		return resolver.DNSTTE2EOK
+	}
+	return resolver.DNSTTTunnelOK
+}
+
+func resetResolverState(resolver model.Resolver) model.Resolver {
+	resolver.DNSTTChecked = false
 	resolver.DNSTTTunnelOK = false
 	resolver.DNSTTE2EOK = false
 	resolver.DNSTTTunnelMillis = 0
 	resolver.DNSTTE2EMillis = 0
-	resolver.DNSTTError = ""
-
-	tunnelOK, tunnelMS, tunnelErr := tunnelCheck(ctx, resolver.IP, cfg.Port, cfg.Domain, cfg.Timeout)
-	if tunnelMS > 0 {
-		resolver.DNSTTTunnelMillis = tunnelMS
-	}
-	if tunnelErr != nil {
-		resolver.DNSTTError = tunnelErr.Error()
-		return resolver
-	}
-	if !tunnelOK {
-		resolver.DNSTTError = "dnstt tunnel precheck failed"
-		return resolver
-	}
-	resolver.DNSTTTunnelOK = true
-
-	if strings.TrimSpace(cfg.Pubkey) == "" {
-		return resolver
-	}
-
-	e2eOK, e2eMS, e2eErr := dnsttCheck(ctx, binaryPath, resolver.IP, cfg.Port, cfg.Domain, cfg.Pubkey, cfg.E2ETimeout, cfg.QuerySize, cfg.E2EPort, ports)
-	if e2eMS > 0 {
-		resolver.DNSTTE2EMillis = e2eMS
-	}
-	if e2eErr != nil {
-		resolver.DNSTTError = e2eErr.Error()
-		return resolver
-	}
-	if !e2eOK {
-		resolver.DNSTTError = "dnstt e2e check failed"
-		return resolver
-	}
-
-	resolver.DNSTTE2EOK = true
 	resolver.DNSTTError = ""
 	return resolver
 }
@@ -285,16 +494,12 @@ func tunnelCheck(ctx context.Context, resolverIP string, port int, domain string
 	}
 }
 
-func dnsttCheck(ctx context.Context, binaryPath, resolverIP string, resolverPort int, domain, pubkey string, timeout time.Duration, querySize int, e2ePort int, ports chan int) (bool, int64, error) {
-	if binaryPath == "" {
-		return false, 0, fmt.Errorf("dnstt-client binary is required for e2e testing")
-	}
-
+func dnsttCheck(ctx context.Context, resolverIP string, resolverPort int, domain, pubkey string, timeout time.Duration, querySize int, e2eURL string, ports chan int) (bool, int64, int64, error) {
 	var port int
 	select {
 	case port = <-ports:
 	case <-ctx.Done():
-		return false, 0, ctx.Err()
+		return false, 0, 0, ctx.Err()
 	}
 	defer func() {
 		ports <- port
@@ -304,62 +509,55 @@ func dnsttCheck(ctx context.Context, binaryPath, resolverIP string, resolverPort
 	defer cancel()
 
 	start := time.Now()
-	var stderr bytes.Buffer
-
-	args := []string{
-		"-udp", net.JoinHostPort(resolverIP, fmt.Sprintf("%d", resolverPort)),
-		"-pubkey", pubkey,
+	addr := fmt.Sprintf("127.0.0.1:%d", port)
+	client, err := newEmbeddedClient(
+		net.JoinHostPort(resolverIP, fmt.Sprintf("%d", resolverPort)),
+		domain,
+		pubkey,
+		addr,
+	)
+	if err != nil {
+		return false, 0, 0, fmt.Errorf("create embedded dnstt client: %w", err)
 	}
+	client.SetAuthoritativeMode(false)
 	if querySize > 0 {
-		args = append(args, "-mtu", fmt.Sprintf("%d", querySize))
-	}
-	args = append(args, domain, fmt.Sprintf("127.0.0.1:%d", port))
-
-	cmd := exec.CommandContext(checkCtx, binaryPath, args...)
-	cmd.Stdout = io.Discard
-	cmd.Stderr = &stderr
-	if err := cmd.Start(); err != nil {
-		return false, 0, fmt.Errorf("start dnstt-client: %w", err)
+		client.SetMaxPayload(querySize)
 	}
 
-	exited := make(chan error, 1)
+	startCh := make(chan error, 1)
 	go func() {
-		exited <- cmd.Wait()
+		startCh <- client.Start()
 	}()
 
-	defer func() {
-		if cmd.Process != nil {
-			_ = cmd.Process.Kill()
+	select {
+	case err := <-startCh:
+		if err != nil {
+			return false, 0, roundMillis(time.Since(start)), fmt.Errorf("start embedded dnstt client: %w", err)
 		}
-		select {
-		case <-exited:
-		case <-time.After(2 * time.Second):
-		}
-	}()
+	case <-checkCtx.Done():
+		return false, 0, roundMillis(time.Since(start)), fmt.Errorf("dnstt e2e timed out")
+	}
+	defer client.Stop()
 
-	if err := waitAndTestSOCKS5Connect(checkCtx, port, resolverIP, e2ePort, exited); err != nil {
-		select {
-		case err := <-exited:
-			if err != nil {
-				stderrText := strings.TrimSpace(stderr.String())
-				if stderrText != "" {
-					return false, roundMillis(time.Since(start)), fmt.Errorf("dnstt-client failed: %s", truncate(stderrText, 220))
-				}
-				return false, roundMillis(time.Since(start)), fmt.Errorf("dnstt-client exited early: %v", err)
-			}
-		default:
-		}
+	if err := waitForEmbeddedSOCKS5Port(checkCtx, addr, client); err != nil {
 		if checkCtx.Err() != nil {
-			return false, roundMillis(time.Since(start)), fmt.Errorf("dnstt e2e timed out")
+			return false, 0, roundMillis(time.Since(start)), fmt.Errorf("dnstt e2e timed out")
 		}
-		return false, roundMillis(time.Since(start)), err
+		return false, 0, roundMillis(time.Since(start)), err
 	}
 
-	return true, roundMillis(time.Since(start)), nil
+	tunnelMS := roundMillis(time.Since(start))
+	if err := verifyHTTPThroughSOCKS5(checkCtx, addr, e2eURL); err != nil {
+		if checkCtx.Err() != nil {
+			return false, tunnelMS, roundMillis(time.Since(start)), fmt.Errorf("dnstt e2e timed out")
+		}
+		return false, tunnelMS, roundMillis(time.Since(start)), err
+	}
+
+	return true, tunnelMS, roundMillis(time.Since(start)), nil
 }
 
-func waitAndTestSOCKS5Connect(ctx context.Context, port int, targetHost string, targetPort int, exited <-chan error) error {
-	addr := fmt.Sprintf("127.0.0.1:%d", port)
+func waitForEmbeddedSOCKS5Port(ctx context.Context, addr string, client embeddedClient) error {
 	for {
 		select {
 		case <-ctx.Done():
@@ -367,97 +565,78 @@ func waitAndTestSOCKS5Connect(ctx context.Context, port int, targetHost string, 
 		case <-time.After(200 * time.Millisecond):
 		}
 
-		select {
-		case <-exited:
-			return fmt.Errorf("dnstt-client exited before socks5 handshake")
-		default:
+		if client != nil && !client.IsRunning() {
+			return fmt.Errorf("embedded dnstt client stopped before socks5 proxy was ready")
 		}
 
 		conn, err := net.DialTimeout("tcp", addr, 500*time.Millisecond)
 		if err != nil {
 			continue
 		}
-
-		if deadline, ok := ctx.Deadline(); ok {
-			_ = conn.SetDeadline(deadline)
-		}
-
-		if _, err := performSOCKS5Greeting(conn); err != nil {
-			_ = conn.Close()
-			return err
-		}
-
-		connectReq, err := buildSOCKS5ConnectRequest(targetHost, targetPort)
-		if err != nil {
-			_ = conn.Close()
-			return err
-		}
-		if _, err := conn.Write(connectReq); err != nil {
-			_ = conn.Close()
-			return fmt.Errorf("socks5 connect write failed: %w", err)
-		}
-
-		connectResp := make([]byte, 4)
-		if _, err := io.ReadFull(conn, connectResp); err != nil {
-			_ = conn.Close()
-			return formatSOCKS5ConnectReplyError(err)
-		}
 		_ = conn.Close()
-		if connectResp[0] != 0x05 {
-			return fmt.Errorf("socks5 connect reply had invalid version 0x%02x", connectResp[0])
-		}
 		return nil
 	}
 }
 
-func formatSOCKS5ConnectReplyError(err error) error {
-	if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
-		return fmt.Errorf("no CONNECT reply from tunnel")
-	}
-	return fmt.Errorf("socks5 connect reply failed: %w", err)
-}
-
-func performSOCKS5Greeting(conn net.Conn) (byte, error) {
-	if _, err := conn.Write([]byte{0x05, 0x01, 0x00}); err != nil {
-		return 0, fmt.Errorf("socks5 greeting failed: %w", err)
-	}
-	response := make([]byte, 2)
-	if _, err := io.ReadFull(conn, response); err != nil {
-		return 0, fmt.Errorf("socks5 greeting reply failed: %w", err)
-	}
-	if response[0] != 0x05 {
-		return 0, fmt.Errorf("socks5 greeting reply had invalid version 0x%02x", response[0])
-	}
-	return response[1], nil
-}
-
-func buildSOCKS5ConnectRequest(host string, port int) ([]byte, error) {
-	if strings.TrimSpace(host) == "" {
-		return nil, fmt.Errorf("dnstt e2e target host is required")
-	}
-	if port <= 0 || port > 65535 {
-		return nil, fmt.Errorf("dnstt e2e port must be between 1 and 65535")
-	}
-
-	request := []byte{0x05, 0x01, 0x00}
-	ip := net.ParseIP(host)
+func normalizeScoreThreshold(value int) int {
 	switch {
-	case ip != nil && ip.To4() != nil:
-		request = append(request, 0x01)
-		request = append(request, ip.To4()...)
-	case ip != nil && ip.To16() != nil:
-		request = append(request, 0x04)
-		request = append(request, ip.To16()...)
+	case value <= 0:
+		return 2
+	case value > 6:
+		return 6
 	default:
-		if len(host) == 0 || len(host) > 255 {
-			return nil, fmt.Errorf("dnstt e2e target host must be between 1 and 255 bytes")
-		}
-		request = append(request, 0x03, byte(len(host)))
-		request = append(request, host...)
+		return value
+	}
+}
+
+func verifyHTTPThroughSOCKS5(ctx context.Context, addr string, testURL string) error {
+	dialer, err := proxy.SOCKS5("tcp", addr, nil, proxy.Direct)
+	if err != nil {
+		return fmt.Errorf("create socks5 dialer: %w", err)
 	}
 
-	request = append(request, byte(port>>8), byte(port))
-	return request, nil
+	tlsTimeout := 10 * time.Second
+	if deadline, ok := ctx.Deadline(); ok {
+		if remaining := time.Until(deadline); remaining < tlsTimeout {
+			tlsTimeout = remaining
+		}
+	}
+
+	transport := &http.Transport{
+		DisableKeepAlives:   true,
+		TLSHandshakeTimeout: tlsTimeout,
+	}
+	if contextDialer, ok := dialer.(proxy.ContextDialer); ok {
+		transport.DialContext = contextDialer.DialContext
+	} else {
+		transport.DialContext = func(_ context.Context, network, address string) (net.Conn, error) {
+			return dialer.Dial(network, address)
+		}
+	}
+
+	client := &http.Client{
+		Transport: transport,
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+	}
+
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, testURL, nil)
+	if err != nil {
+		return fmt.Errorf("create http verification request: %w", err)
+	}
+
+	response, err := client.Do(request)
+	if err != nil {
+		return fmt.Errorf("http verification failed: %w", err)
+	}
+	defer response.Body.Close()
+
+	if response.StatusCode < 200 || response.StatusCode >= 400 {
+		return fmt.Errorf("http verification returned status %d", response.StatusCode)
+	}
+
+	return nil
 }
 
 func queryRaw(ctx context.Context, resolver string, port int, domain string, qtype uint16, timeout time.Duration) (*dns.Msg, bool) {
@@ -527,66 +706,6 @@ func queryRaw(ctx context.Context, resolver string, port int, domain string, qty
 	}
 
 	return response, true
-}
-
-func platformVariants(name string) []string {
-	variants := []string{name}
-	switch runtime.GOOS {
-	case "windows":
-		if filepath.Ext(name) == "" {
-			variants = []string{name + ".exe", name}
-		}
-	case "linux":
-		variants = append(variants, name+"-linux")
-	case "darwin":
-		variants = append(variants, name+"-darwin")
-	}
-	return variants
-}
-
-func findBinary(name string) (string, error) {
-	variants := platformVariants(name)
-
-	for _, variant := range variants {
-		if path, err := exec.LookPath(variant); err == nil {
-			return path, nil
-		}
-	}
-
-	for _, variant := range variants {
-		if abs, err := filepath.Abs(variant); err == nil {
-			if info, err := os.Stat(abs); err == nil && isExecutable(info) {
-				return abs, nil
-			}
-		}
-	}
-
-	if executable, err := os.Executable(); err == nil {
-		for _, variant := range variants {
-			candidate := filepath.Join(filepath.Dir(executable), variant)
-			if info, err := os.Stat(candidate); err == nil && isExecutable(info) {
-				return candidate, nil
-			}
-		}
-	}
-
-	pathHelp := fmt.Sprintf("  2. Move it to a folder in PATH:  sudo mv %s /usr/local/bin/\n  3. Or add current directory to PATH:  export PATH=$PATH:$(pwd)", name)
-	if runtime.GOOS == "windows" {
-		pathHelp = "  2. Or add the folder to PATH:  set PATH=%PATH%;%cd%"
-	}
-
-	return "", fmt.Errorf(
-		"%s not found in PATH, current directory, or next to the range-scout binary.\n\nInstall with Go:\n  go install www.bamsoftware.com/git/dnstt.git/dnstt-client@latest\n\nIf already downloaded, either:\n  1. Place it next to the range-scout executable\n%s",
-		name,
-		pathHelp,
-	)
-}
-
-func isExecutable(info os.FileInfo) bool {
-	if info.IsDir() {
-		return false
-	}
-	return info.Mode()&0o111 != 0
 }
 
 func randLabel(n int) string {

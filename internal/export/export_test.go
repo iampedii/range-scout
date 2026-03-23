@@ -102,10 +102,10 @@ func TestSaveResolversCSVIncludesTransportAndStableColumns(t *testing.T) {
 	}
 
 	text := string(data)
-	if !strings.Contains(text, "operator,ip,transport,dns_reachable,recursion_available,recursion_advertised,stable,response_code,latency_ms,prefix,dnstt_checked,dnstt_tunnel_ok,dnstt_e2e_ok,dnstt_tunnel_ms,dnstt_e2e_ms,dnstt_error") {
+	if !strings.Contains(text, "operator,ip,transport,dns_reachable,scan_status,scan_error,tunnel_score,tunnel_ns_support,tunnel_txt_support,tunnel_random_sub,tunnel_realism,tunnel_edns0_support,tunnel_edns_max_payload,tunnel_nxdomain,recursion_available,recursion_advertised,stable,response_code,latency_ms,prefix,dnstt_checked,dnstt_tunnel_ok,dnstt_e2e_ok,dnstt_tunnel_ms,dnstt_e2e_ms,dnstt_error") {
 		t.Fatalf("csv header missing transport/stable columns: %s", text)
 	}
-	if !strings.Contains(text, "TIC,198.51.100.10,TCP,true,true,true,true,NOERROR,21,198.51.100.0/24,true,true,true,41,285,") {
+	if !strings.Contains(text, "TIC,198.51.100.10,TCP,true,,,0,false,false,false,false,false,0,false,true,true,true,NOERROR,21,198.51.100.0/24,true,true,true,41,285,") {
 		t.Fatalf("csv row missing transport/stable/dnstt value: %s", text)
 	}
 }

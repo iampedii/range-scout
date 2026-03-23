@@ -182,7 +182,34 @@ func buildResolverTXT(result model.ScanResult) []byte {
 func buildResolverCSV(result model.ScanResult) ([]byte, error) {
 	var buffer bytes.Buffer
 	writer := csv.NewWriter(&buffer)
-	if err := writer.Write([]string{"operator", "ip", "transport", "dns_reachable", "recursion_available", "recursion_advertised", "stable", "response_code", "latency_ms", "prefix", "dnstt_checked", "dnstt_tunnel_ok", "dnstt_e2e_ok", "dnstt_tunnel_ms", "dnstt_e2e_ms", "dnstt_error"}); err != nil {
+	if err := writer.Write([]string{
+		"operator",
+		"ip",
+		"transport",
+		"dns_reachable",
+		"scan_status",
+		"scan_error",
+		"tunnel_score",
+		"tunnel_ns_support",
+		"tunnel_txt_support",
+		"tunnel_random_sub",
+		"tunnel_realism",
+		"tunnel_edns0_support",
+		"tunnel_edns_max_payload",
+		"tunnel_nxdomain",
+		"recursion_available",
+		"recursion_advertised",
+		"stable",
+		"response_code",
+		"latency_ms",
+		"prefix",
+		"dnstt_checked",
+		"dnstt_tunnel_ok",
+		"dnstt_e2e_ok",
+		"dnstt_tunnel_ms",
+		"dnstt_e2e_ms",
+		"dnstt_error",
+	}); err != nil {
 		return nil, err
 	}
 	for _, resolver := range result.Resolvers {
@@ -191,6 +218,16 @@ func buildResolverCSV(result model.ScanResult) ([]byte, error) {
 			resolver.IP,
 			resolver.Transport,
 			fmt.Sprintf("%t", resolver.DNSReachable),
+			resolver.ScanStatus,
+			resolver.ScanError,
+			fmt.Sprintf("%d", resolver.TunnelScore),
+			fmt.Sprintf("%t", resolver.TunnelNSSupport),
+			fmt.Sprintf("%t", resolver.TunnelTXTSupport),
+			fmt.Sprintf("%t", resolver.TunnelRandomSub),
+			fmt.Sprintf("%t", resolver.TunnelRealism),
+			fmt.Sprintf("%t", resolver.TunnelEDNS0Support),
+			fmt.Sprintf("%d", resolver.TunnelEDNSMaxPayload),
+			fmt.Sprintf("%t", resolver.TunnelNXDOMAIN),
 			fmt.Sprintf("%t", resolver.RecursionAvailable),
 			fmt.Sprintf("%t", resolver.RecursionAdvertised),
 			fmt.Sprintf("%t", resolver.Stable),
