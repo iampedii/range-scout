@@ -146,7 +146,7 @@ func Scan(
 		StartedAt:      time.Now(),
 	}
 
-	if DetectTransparentProxy(ctx, domain, 2*time.Second) {
+	if totalTargets > 0 && DetectTransparentProxy(ctx, domain, 2*time.Second) {
 		result.TransparentProxyDetected = true
 		result.Warnings = append(result.Warnings, "transparent DNS proxy detected; results may be inaccurate")
 	}
