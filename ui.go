@@ -37,6 +37,7 @@ type layoutMetrics struct {
 	height            int
 	operatorWidth     int
 	rightWidth        int
+	detailsWidth      int
 	activityWidth     int
 	activityHeight    int
 	footerHeight      int
@@ -73,7 +74,7 @@ const (
 	formNoteWrapWidth    = 24
 	formSidebarWrapWidth = 20
 	uiSeparatorLine      = "────────────────────────"
-	uiVersionLabel       = "v0.1.6-rc1"
+	uiVersionLabel       = "v0.1.6-rc3"
 	operatorPlaceholder  = "Paste or Import"
 	customOperatorKey    = "custom"
 	customOperatorName   = "Custom Targets"
@@ -365,7 +366,7 @@ func (u *ui) layoutModeForSize(width, height int) layoutMode {
 	if width <= 0 || height <= 0 {
 		return layoutWide
 	}
-	if width < 170 || height < 40 {
+	if width < 180 || height < 40 {
 		return layoutCompact
 	}
 	return layoutWide
@@ -450,6 +451,7 @@ func (u *ui) calculateLayoutMetrics(width, height int) layoutMetrics {
 		metrics.formNoteWidth = clampInt(contentWidth/5+18, 28, 42)
 		metrics.formSidebarWidth = clampInt(contentWidth/4+8, 24, 36)
 		detailsWidth := max(contentWidth-metrics.activityWidth-4, 36)
+		metrics.detailsWidth = detailsWidth
 		metrics.detailsGuideWidth = clampGuideWrapWidth(detailsWidth - 3)
 	default:
 		metrics.operatorWidth = clampInt(width/6, 24, 30)
@@ -458,6 +460,7 @@ func (u *ui) calculateLayoutMetrics(width, height int) layoutMetrics {
 		metrics.formNoteWidth = formNoteWrapWidth
 		metrics.formSidebarWidth = formSidebarWrapWidth
 		detailsWidth := max(width-metrics.operatorWidth-metrics.rightWidth-6, 48)
+		metrics.detailsWidth = detailsWidth
 		metrics.detailsGuideWidth = clampGuideWrapWidth(detailsWidth - 3)
 	}
 
@@ -502,6 +505,18 @@ func clampGuideWrapWidth(width int) int {
 	return width
 }
 
+func (u *ui) detailsRenderWidth() int {
+	width := u.layoutState.detailsWidth
+	if width <= 0 {
+		width = 80
+	}
+	width -= 3
+	if width < 32 {
+		return 32
+	}
+	return width
+}
+
 func (u *ui) populateOperators() {
 	u.operatorList.AddItem(operatorPlaceholder, "", 0, nil)
 	for _, op := range u.operators {
@@ -511,6 +526,7 @@ func (u *ui) populateOperators() {
 }
 
 func (u *ui) handleKeys(event *tcell.EventKey) *tcell.EventKey {
+	event = normalizeNavigationEvent(event)
 	if u.focusIsEditable() {
 		if isClipboardPasteEvent(event) {
 			if err := u.pasteClipboardIntoFocusedEditable(); err != nil {
@@ -604,6 +620,34 @@ func (u *ui) handleKeys(event *tcell.EventKey) *tcell.EventKey {
 	}
 
 	return event
+}
+
+func normalizeNavigationEvent(event *tcell.EventKey) *tcell.EventKey {
+	if event == nil {
+		return nil
+	}
+
+	shift := event.Modifiers()&tcell.ModShift != 0
+	switch {
+	case event.Key() == tcell.KeyBacktab:
+		return tcell.NewEventKey(tcell.KeyBacktab, 0, tcell.ModNone)
+	case event.Key() == tcell.KeyEnter || event.Key() == tcell.KeyCtrlM:
+		return tcell.NewEventKey(tcell.KeyEnter, 0, tcell.ModNone)
+	case event.Key() == tcell.KeyTab || event.Key() == tcell.KeyCtrlI:
+		if shift {
+			return tcell.NewEventKey(tcell.KeyBacktab, 0, tcell.ModNone)
+		}
+		return tcell.NewEventKey(tcell.KeyTab, 0, tcell.ModNone)
+	case event.Key() == tcell.KeyRune && event.Rune() == '\r':
+		return tcell.NewEventKey(tcell.KeyEnter, 0, tcell.ModNone)
+	case event.Key() == tcell.KeyRune && event.Rune() == '\t':
+		if shift {
+			return tcell.NewEventKey(tcell.KeyBacktab, 0, tcell.ModNone)
+		}
+		return tcell.NewEventKey(tcell.KeyTab, 0, tcell.ModNone)
+	default:
+		return event
+	}
 }
 
 func (u *ui) cycleFocus() {
@@ -1704,21 +1748,7 @@ func (u *ui) renderDetails() {
 			}
 		} else {
 			builder.WriteString("DNS Hosts\n")
-			for index, resolver := range resolvers {
-				fmt.Fprintf(&builder, "%02d  %-15s  %-4s  %d/6  %-34s  %5d ms  %-7s  %s\n",
-					index+1,
-					resolver.IP,
-					displayTransport(resolver.Transport),
-					resolver.TunnelScore,
-					resolverTunnelDetails(resolver),
-					resolver.LatencyMillis,
-					dnsttStatusLabel(resolver),
-					resolver.Prefix,
-				)
-				if showDNSTTError(resolver) {
-					fmt.Fprintf(&builder, "    dnstt error: %s\n", displayDNSTTError(resolver.DNSTTError))
-				}
-			}
+			writeResolverRows(&builder, resolvers, customTargets, u.detailsRenderWidth())
 		}
 	case screenDNSTT:
 		u.details.SetTitle("DNSTT Details")
@@ -1729,6 +1759,7 @@ func (u *ui) renderDetails() {
 		activeScanForCurrentOperator := u.activeScanOperator == operatorKey && u.scanCancel != nil
 		activeDNSTTForCurrentOperator := u.activeDNSTTOperator == operatorKey && u.dnsttCancel != nil
 		lookup, lookupLoaded := u.lookupCache[operatorKey]
+		customTargets := lookupLoaded && lookupUsesCustomTargets(lookup)
 		u.writeStageWorkflow(&builder, operatorKey, lookup, lookupLoaded, progress, dnsttState, activeScanForCurrentOperator, activeDNSTTForCurrentOperator, qualifiedCount)
 		writeDNSTTOptionGuide(&builder, u.detailsGuideWrapWidth())
 		fmt.Fprintf(&builder, "Operator: %s\n", operator.Name)
@@ -1780,21 +1811,7 @@ func (u *ui) renderDetails() {
 			builder.WriteString("No DNS services reached yet.\n")
 		} else {
 			builder.WriteString("DNS Hosts\n")
-			for index, resolver := range resolvers {
-				fmt.Fprintf(&builder, "%02d  %-15s  %-4s  %d/6  %-34s  %5d ms  %-7s  %s\n",
-					index+1,
-					resolver.IP,
-					displayTransport(resolver.Transport),
-					resolver.TunnelScore,
-					resolverTunnelDetails(resolver),
-					resolver.LatencyMillis,
-					dnsttStatusLabel(resolver),
-					resolver.Prefix,
-				)
-				if showDNSTTError(resolver) {
-					fmt.Fprintf(&builder, "    dnstt error: %s\n", displayDNSTTError(resolver.DNSTTError))
-				}
-			}
+			writeResolverRows(&builder, resolvers, customTargets, u.detailsRenderWidth())
 		}
 	}
 
@@ -3401,13 +3418,15 @@ func dnsttStatusLabel(resolver model.Resolver) string {
 func resolverTunnelDetails(resolver model.Resolver) string {
 	flag := func(ok bool, label string) string {
 		if ok {
-			return label + "✓"
+			return label + "+"
 		}
-		return label + "✗"
+		return label + "-"
 	}
-	edns := flag(resolver.TunnelEDNS0Support, "EDNS")
+	edns := "E-"
 	if resolver.TunnelEDNS0Support && resolver.TunnelEDNSMaxPayload > 0 {
-		edns += fmt.Sprintf("(%d)", resolver.TunnelEDNSMaxPayload)
+		edns = fmt.Sprintf("E%d", resolver.TunnelEDNSMaxPayload)
+	} else if resolver.TunnelEDNS0Support {
+		edns = "E+"
 	}
 	return fmt.Sprintf("%s %s %s %s %s %s",
 		flag(resolver.TunnelNSSupport, "NS"),
@@ -3421,6 +3440,47 @@ func resolverTunnelDetails(resolver model.Resolver) string {
 
 func showDNSTTError(resolver model.Resolver) bool {
 	return resolver.DNSTTChecked && !resolver.DNSTTE2EOK && strings.TrimSpace(resolver.DNSTTError) != ""
+}
+
+func writeResolverRows(builder *strings.Builder, resolvers []model.Resolver, customTargets bool, width int) {
+	for index, resolver := range resolvers {
+		writeClippedDetailLine(builder, fmt.Sprintf("%02d  %s  %s  %d/6  %dms  %s",
+			index+1,
+			resolver.IP,
+			displayTransport(resolver.Transport),
+			resolver.TunnelScore,
+			resolver.LatencyMillis,
+			dnsttStatusLabel(resolver),
+		), width)
+		writeClippedDetailLine(builder, "    caps: "+resolverTunnelDetails(resolver), width)
+		if target := displayResolverTarget(resolver, customTargets); target != "" {
+			writeClippedDetailLine(builder, "    target: "+target, width)
+		}
+		if showDNSTTError(resolver) {
+			writeClippedDetailLine(builder, "    dnstt error: "+displayDNSTTError(resolver.DNSTTError), width)
+		}
+	}
+}
+
+func writeClippedDetailLine(builder *strings.Builder, text string, width int) {
+	builder.WriteString(truncateDisplayText(text, width))
+	builder.WriteByte('\n')
+}
+
+func truncateDisplayText(text string, width int) string {
+	trimmed := strings.TrimRight(text, " ")
+	if width <= 0 {
+		return trimmed
+	}
+
+	runes := []rune(trimmed)
+	if len(runes) <= width {
+		return trimmed
+	}
+	if width <= 3 {
+		return string(runes[:width])
+	}
+	return string(runes[:width-3]) + "..."
 }
 
 func displayDNSTTError(value string) string {
@@ -4108,6 +4168,20 @@ func displayTargetEntry(entry model.PrefixEntry, imported bool) string {
 		return addr
 	}
 	return entry.Prefix
+}
+
+func displayResolverTarget(resolver model.Resolver, customTargets bool) string {
+	prefix := strings.TrimSpace(resolver.Prefix)
+	if prefix == "" {
+		return ""
+	}
+	if addr, ok := singleIPFromPrefix(prefix); ok && strings.TrimSpace(resolver.IP) == addr {
+		return ""
+	}
+	if customTargets {
+		return displayTargetEntry(model.PrefixEntry{Prefix: prefix}, true)
+	}
+	return prefix
 }
 
 func singleIPFromPrefix(prefix string) (string, bool) {

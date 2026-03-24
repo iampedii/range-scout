@@ -330,6 +330,9 @@ func TestUILayoutModeForSizeSwitchesToCompactOnSmallScreens(t *testing.T) {
 	if got := u.layoutModeForSize(160, 40); got != layoutCompact {
 		t.Fatalf("expected compact layout for small screen, got %s", got)
 	}
+	if got := u.layoutModeForSize(175, 45); got != layoutCompact {
+		t.Fatalf("expected compact layout for intermediate screen width, got %s", got)
+	}
 	if got := u.layoutModeForSize(190, 45); got != layoutWide {
 		t.Fatalf("expected wide layout for larger screen, got %s", got)
 	}
@@ -720,6 +723,57 @@ func TestHandleKeysPastesClipboardIntoFocusedInputField(t *testing.T) {
 	}
 	if got := field.GetText(); got != "198.51.100.10" {
 		t.Fatalf("expected clipboard text to be pasted into input field, got %q", got)
+	}
+}
+
+func TestHandleKeysNormalizesWindowsTabForEditableField(t *testing.T) {
+	u := newUI()
+
+	field := u.newInput("Test", "", func(string) {})
+	u.form.Clear(true)
+	u.form.AddFormItem(field)
+	u.form.SetFocus(0)
+	u.app.SetFocus(u.form)
+
+	event := tcell.NewEventKey(tcell.KeyCtrlI, 0, tcell.ModNone)
+	got := u.handleKeys(event)
+	if got == nil {
+		t.Fatal("expected tab event to be passed through to the form")
+	}
+	if got.Key() != tcell.KeyTab {
+		t.Fatalf("expected windows tab event to normalize to KeyTab, got %s", got.Name())
+	}
+}
+
+func TestHandleKeysNormalizesWindowsEnterToAdvanceFormField(t *testing.T) {
+	u := newUI()
+
+	first := u.newInput("First", "", func(string) {})
+	second := u.newInput("Second", "", func(string) {})
+	u.form.Clear(true)
+	u.form.AddFormItem(first)
+	u.form.AddFormItem(second)
+	u.form.SetFocus(0)
+	u.form.Focus(func(p tview.Primitive) {
+		u.app.SetFocus(p)
+	})
+
+	if !first.HasFocus() {
+		t.Fatal("expected first field to have focus before pressing enter")
+	}
+
+	event := u.handleKeys(tcell.NewEventKey(tcell.KeyCtrlM, 0, tcell.ModNone))
+	if event == nil {
+		t.Fatal("expected enter event to be passed through to the form")
+	}
+	if handler := u.form.InputHandler(); handler != nil {
+		handler(event, func(p tview.Primitive) {
+			u.app.SetFocus(p)
+		})
+	}
+
+	if !second.HasFocus() {
+		t.Fatal("expected enter to advance focus to the next field")
 	}
 }
 
@@ -1858,6 +1912,103 @@ func TestScannerDetailsShowDNSTTErrorForFailedE2E(t *testing.T) {
 	text := u.details.GetText(true)
 	if !strings.Contains(text, "dnstt error: socks5 handshake did not complete") {
 		t.Fatalf("expected DNSTT error in report section, got: %s", text)
+	}
+}
+
+func TestScannerDetailsOmitRedundantSingleIPTargetColumnForCustomTargets(t *testing.T) {
+	u := newUI()
+	operator := u.selectedOperator()
+	u.lookupCache[operator.Key] = model.LookupResult{
+		Operator:    operator,
+		SourceLabel: string(targetSourcePaste),
+		Entries: []model.PrefixEntry{
+			{Prefix: "198.51.100.20/32", TotalAddresses: 1, ScanHosts: 1},
+		},
+	}
+	u.scanCache[operator.Key] = model.ScanResult{
+		Operator:      operator,
+		FinishedAt:    time.Now(),
+		Protocol:      string(scanner.ProtocolUDP),
+		Port:          53,
+		Workers:       64,
+		TimeoutMillis: 1200,
+		Resolvers: []model.Resolver{
+			{
+				IP:                 "198.51.100.20",
+				Prefix:             "198.51.100.20/32",
+				Transport:          string(scanner.ProtocolUDP),
+				LatencyMillis:      20,
+				TunnelScore:        4,
+				TunnelNSSupport:    true,
+				TunnelTXTSupport:   true,
+				TunnelRandomSub:    true,
+				TunnelRealism:      true,
+				TunnelEDNS0Support: true,
+				TunnelNXDOMAIN:     true,
+			},
+		},
+	}
+	u.mode = screenScanner
+	u.ensureScanRangeSelection(operator.Key)
+
+	u.renderDetails()
+
+	text := u.details.GetText(true)
+	if strings.Contains(text, "198.51.100.20/32") {
+		t.Fatalf("expected redundant /32 target to be hidden, got: %s", text)
+	}
+	if strings.Contains(text, "target: 198.51.100.20") {
+		t.Fatalf("expected duplicate target line to be omitted, got: %s", text)
+	}
+	if !strings.Contains(text, "caps: NS+ TXT+ RND+ DPI+ E+ NXD+") {
+		t.Fatalf("expected compact ASCII capability line, got: %s", text)
+	}
+}
+
+func TestScannerDetailsKeepTargetLineForSharedPrefixes(t *testing.T) {
+	u := newUI()
+	operator := u.selectedOperator()
+	u.lookupCache[operator.Key] = model.LookupResult{
+		Operator: operator,
+		Entries: []model.PrefixEntry{
+			{Prefix: "198.51.100.0/24", TotalAddresses: 256, ScanHosts: 254},
+		},
+	}
+	u.scanCache[operator.Key] = model.ScanResult{
+		Operator:      operator,
+		FinishedAt:    time.Now(),
+		Protocol:      string(scanner.ProtocolUDP),
+		Port:          53,
+		Workers:       64,
+		TimeoutMillis: 1200,
+		Resolvers: []model.Resolver{
+			{
+				IP:                   "198.51.100.20",
+				Prefix:               "198.51.100.0/24",
+				Transport:            string(scanner.ProtocolUDP),
+				LatencyMillis:        20,
+				TunnelScore:          4,
+				TunnelNSSupport:      true,
+				TunnelTXTSupport:     true,
+				TunnelRandomSub:      true,
+				TunnelRealism:        true,
+				TunnelEDNS0Support:   true,
+				TunnelEDNSMaxPayload: 1232,
+				TunnelNXDOMAIN:       true,
+			},
+		},
+	}
+	u.mode = screenScanner
+	u.ensureScanRangeSelection(operator.Key)
+
+	u.renderDetails()
+
+	text := u.details.GetText(true)
+	if !strings.Contains(text, "target: 198.51.100.0/24") {
+		t.Fatalf("expected shared prefix target line to stay visible, got: %s", text)
+	}
+	if !strings.Contains(text, "caps: NS+ TXT+ RND+ DPI+ E1232 NXD+") {
+		t.Fatalf("expected compact ASCII capability line with EDNS payload, got: %s", text)
 	}
 }
 

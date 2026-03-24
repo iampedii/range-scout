@@ -26,7 +26,7 @@ build-windows:
 	@$(MAKE) build-dist TARGET_OS=windows TARGET_ARCH=amd64
 
 release-check:
-	@test -n "$(RELEASE_VERSION)" || (echo "release builds require HEAD to be tagged (for example v0.1.6 or v0.1.6-rc1)"; exit 1)
+	@test -n "$(RELEASE_VERSION)" || (echo "release builds require HEAD to be tagged (for example v0.1.6 or v0.1.6-rc3)"; exit 1)
 	@test -z "$(WORKTREE_STATUS)" || (echo "release builds require a clean git worktree"; exit 1)
 
 release: release-check
