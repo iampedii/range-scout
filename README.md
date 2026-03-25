@@ -6,9 +6,10 @@
 - importing IPv4 CIDRs or single IPv4 addresses from a local `.txt` file
 - pasting IPv4 CIDRs or single IPv4 addresses directly into the TUI
 - choosing one or more ranges to scan
-- checking which hosts on that range answer on DNS and allow recursion
-- testing healthy recursive resolvers against a DNSTT domain after the scan
-- exporting prefixes or scan results on demand as `txt`, `csv`, or `json`
+- running a SlipNet-style UDP DNS compatibility scan on a configurable port
+- opening a dedicated DNSTT stage after the scan for tunnel-only or end-to-end checks
+- exporting targets, scan results, or DNSTT-passed results on demand as `txt`, `csv`, or `json`
+- saving startup defaults to `config.json`
 
 ## Screenshot
 
@@ -18,14 +19,15 @@
 
 1. Loads IPv4 scan targets for a selected operator, from a local `.txt` file, or from pasted text.
 2. Lets you choose one or more CIDR ranges or single IPs from that loaded target set.
-3. Scans hosts in those ranges over UDP, TCP, or both on a configurable port (default `53`).
-4. Marks hosts as:
-   - `dns reachable`
-   - `recursive`
-   - `stable` if both probe sites resolve successfully
-5. Optionally runs a DNSTT pass only on healthy recursive resolvers from the latest scan:
-   - `tunnel` when the TXT-based tunnel precheck succeeds
-   - `e2e` when the embedded DNSTT runtime starts and the full tunnel works with your pubkey
+3. Scans hosts in those ranges over UDP on a configurable port (default `53`).
+4. Runs the same six SlipNet-style compatibility probes used by the app’s tunnel scoring flow and assigns each resolver a score from `0` to `6`.
+5. Treats resolvers at or above the configured score threshold as DNSTT candidates.
+6. Opens a dedicated DNSTT screen after the scan where you can:
+   - leave `DNSTT Pubkey` empty for tunnel-only validation
+   - set `DNSTT Pubkey` for full embedded DNSTT E2E validation
+   - optionally set `SOCKS Username` and `SOCKS Password` if the remote SOCKS service requires authentication
+   - optionally enable `Test Nearby IPs` to fan out one extra DNSTT pass across the rest of a successful resolver’s `/24`
+7. Exports targets, scan successes, DNSTT-passed resolvers, and paired failure files when those stages complete.
 
 ## Build
 
@@ -126,7 +128,9 @@ Example:
     "querySize": "",
     "scoreThreshold": "2",
     "e2eURL": "http://www.gstatic.com/generate_204",
-    "testNearbyIPs": "No"
+    "testNearbyIPs": "No",
+    "socksUsername": "",
+    "socksPassword": ""
   }
 }
 ```
@@ -135,7 +139,9 @@ Notes:
 
 - `importFilePaths` may be a single string or an object map.
 - The app writes UI field values back as strings when you use `Save Config`.
-- The current UI reads and writes these startup fields: `workers`, `timeoutMS`, `port`, `protocol`, `recursionHost`, `probeHost1`, `probeHost2`, `domain`, `pubkey`, `timeoutMS`, `e2eTimeoutS`, `querySize`, `scoreThreshold`, `e2eURL`, and `testNearbyIPs`.
+- `socksUsername` and `socksPassword` are optional. A SOCKS password without a username is invalid for DNSTT E2E.
+- The current UI reads and writes these startup fields: `workers`, `timeoutMS`, `port`, `protocol`, `recursionHost`, `probeHost1`, `probeHost2`, `domain`, `pubkey`, `timeoutMS`, `e2eTimeoutS`, `querySize`, `scoreThreshold`, `e2eURL`, `testNearbyIPs`, `socksUsername`, and `socksPassword`.
+- `protocol`, `recursionHost`, `probeHost1`, `probeHost2`, and `e2ePort` may still appear in `config.json` for compatibility with older saved configs. The current scanner workflow in the TUI uses UDP-only SlipNet-style compatibility probes.
 - Use `"default"` to provide a fallback import path for any operator.
 - Relative import paths are resolved relative to the `config.json` directory.
 - `Save Config` keeps import paths relative to the config file when possible, so shared configs stay portable.
@@ -149,30 +155,35 @@ Notes:
 3. Click `Load Targets` to load operator prefixes, set `Import File` and click `Import TXT`, or click `Paste Targets` and paste directly into the modal.
 4. Click `Scan Setup`.
 5. Click `Pick Targets`, use the filter box if needed, and choose one or more CIDRs or single IPs. New target sets start with all targets selected, and the picker has `Select All` / `Deselect All` actions.
-6. Set the port, protocol, recursion host, and probe hosts.
-   Enter hostnames only, without `http://` or `https://`.
+6. Set `Workers`, `Timeout`, `Port`, `DNSTT Domain`, `Query Size`, and `Score Threshold`. The current scan UI uses UDP probes.
 7. Click `Start Scan`.
-8. If you want DNSTT validation, set `DNSTT Domain`. Leave `DNSTT Pubkey` empty for tunnel-only checks, or set it for full end-to-end validation. `E2E URL` defaults to `http://www.gstatic.com/generate_204`, matching SlipNet's HTTP probe.
-9. Leave `Query Size` empty unless you specifically want to cap the embedded DNSTT query payload size.
-10. Click `Test DNSTT` after the scan to open the dedicated DNSTT setup screen. The flow is `Load Targets -> DNS Scan -> DNSTT E2E`.
-11. Click `Export` if you want to save scan results.
-12. In target mode, `Save Targets` uses the `cidr-<label>` filename prefix.
-13. In scanner mode before DNSTT, `Export` writes successful scan hits to `dns-scan-success-<label>` and completed-scan failures to `dns-scan-failures-<label>`.
-14. After DNSTT finishes, `Export Passed` uses the `dnstt-scan-success-<label>` filename prefix.
+8. Review the cached scan state in the details pane. If the app detected a transparent DNS proxy during the scan, it will warn you there.
+9. Click `Test DNSTT` after the scan to open the dedicated DNSTT setup screen. The staged flow is `Load Targets -> DNS Scan -> DNSTT E2E`.
+10. On the DNSTT screen:
+    - leave `DNSTT Pubkey` empty for tunnel-only validation
+    - set `DNSTT Pubkey` for full end-to-end validation
+    - leave `Query Size` empty unless you specifically want smaller embedded DNSTT queries
+    - keep `E2E URL` at `http://www.gstatic.com/generate_204` unless you need a different HTTP or HTTPS probe
+    - set `SOCKS Username` and `SOCKS Password` only when the remote SOCKS service requires authentication
+    - enable `Test Nearby IPs` if you want successful original IPv4 resolvers to trigger one extra `/24` DNSTT sweep
+11. Click `Start DNSTT`.
+12. Use `Export` on the scanner screen to save scan-stage successes, and use `Export Passed` on the DNSTT screen to save only DNSTT-passed resolvers plus a paired checked-failures file.
+13. Use `Copy Passed` on the DNSTT screen if you want the passed resolver IPs in the clipboard without writing a file.
+14. Use `Save Config` whenever you want the current startup defaults written back to `config.json`.
 
 ## User Guidance
 
-`range-scout` is mainly a tool for finding available IPs from operator ranges that answer DNS on the selected port and protocol.
+`range-scout` is mainly a tool for finding IPv4 resolvers from operator ranges or custom target sets, then pushing only the best candidates through a second-stage DNSTT validation flow.
 
 How it works:
 
 1. The app loads public IPv4 ranges for the selected operator, imports IPv4 CIDRs / single IPv4s from a local `.txt` file, or accepts pasted IPv4 CIDRs / single IPv4s.
 2. You choose one or more CIDR ranges or imported / pasted single IPs that you want to scan.
-3. The scanner probes each host in those ranges over `UDP`, `TCP`, or `BOTH` on the port you choose.
-4. If a host answers DNS, the app records it as a candidate IP.
-5. The app then checks whether recursion works and whether the resolver is stable by testing the probe hostnames you set.
-6. If you want, the app can then test only the healthy recursive resolvers against your DNSTT domain.
-7. You can export the discovered IPs after the scan finishes.
+3. The scanner probes each host in those ranges over UDP on the port you choose.
+4. If a host answers DNS, the app records it and runs the six SlipNet-style compatibility probes that feed the tunnel score.
+5. The app treats resolvers at or above the current score threshold as DNSTT candidates.
+6. If you want, the app can then test only those qualified resolvers against your DNSTT domain.
+7. You can export scan-stage or DNSTT-stage outputs after the relevant stage finishes.
 
 What to do:
 
@@ -181,22 +192,25 @@ What to do:
 3. Load the targets first.
 4. Use `Pick Targets` to limit the scan to the CIDRs or single IPs you want. All loaded targets start selected by default, and you can use `Select All` / `Deselect All` in the picker. The scan automatically covers all scannable hosts in the selected targets, so there is no separate host-limit field to tune.
 5. Keep port `53` unless you specifically need another DNS port.
-6. Use `UDP` for the normal DNS path, `TCP` if you want TCP-only testing, or `BOTH` if you want the scanner to try UDP first and then TCP.
-7. Set `Recursion Host` to an outside hostname you want to use for the first recursive lookup check.
-8. Set probe hosts that are accessible from the restricted network you care about. These probes are used to judge stable recursive resolution.
-9. If you want DNSTT validation, set `DNSTT Domain`. Leave `DNSTT Pubkey` empty if you only want the tunnel precheck. Set `DNSTT Pubkey` if you want a full end-to-end DNSTT check.
-10. `E2E URL` is fetched through the local SOCKS5 proxy after the embedded DNSTT runtime starts. The request must return an HTTP status in the `2xx` or `3xx` range to pass.
-11. Leave `Query Size` empty or `0` unless you specifically want smaller DNSTT queries.
-12. Run the scan first, then use `Test DNSTT` to open the dedicated DNSTT screen and start the DNSTT stage there.
-13. Export the results you want to keep. Export filenames are stage-specific:
+6. Set `DNSTT Domain` before the scan so the compatibility probes and tunnel-score workflow use the right domain.
+7. Leave `Query Size` empty or `0` unless you specifically want smaller DNSTT queries.
+8. Set `Score Threshold` to control how strict the scan should be before a resolver qualifies for the DNSTT stage.
+9. Run the scan first, then use `Test DNSTT` to open the dedicated DNSTT screen and start the DNSTT stage there.
+10. Leave `DNSTT Pubkey` empty if you only want the tunnel precheck. Set `DNSTT Pubkey` if you want a full end-to-end DNSTT check.
+11. `E2E URL` is fetched through the local SOCKS5 proxy after the embedded DNSTT runtime starts. The request must return an HTTP status in the `2xx` or `3xx` range to pass.
+12. If the remote SOCKS service requires authentication, fill in `SOCKS Username` and `SOCKS Password` on the DNSTT screen.
+13. Enable `Test Nearby IPs` if you want each successful original IPv4 seed to trigger one extra DNSTT run across the rest of its `/24`. Nearby-discovered IPs do not expand again.
+14. Export the results you want to keep. Export filenames are stage-specific:
     `cidr-<label>`, `dns-scan-success-<label>`, `dns-scan-failures-<label>`, and `dnstt-scan-success-<label>`.
 
 Important:
 
 - This tool helps you get available IPs and candidate DNS resolvers.
-- DNSTT checks only run against healthy recursive resolvers from the latest scan.
+- DNSTT checks only run against resolvers that meet the current SlipNet compatibility score threshold from the latest scan.
 - End-to-end DNSTT validation now uses an embedded runtime inside `range-scout`; no separate `dnstt-client` binary is required.
 - The e2e check follows SlipNet's HTTP-style verification. After the embedded DNSTT runtime starts a local SOCKS5 proxy, the app fetches `E2E URL` through that proxy and treats HTTP `2xx` or `3xx` as success.
+- Authenticated SOCKS5 E2E checks are supported through the optional `SOCKS Username` and `SOCKS Password` fields.
+- `Export Passed` on the DNSTT screen writes both the passed resolver file and a paired checked-failures file. Scanner-stage failure export only happens when the full selected target set finished scanning.
 - A positive result here still does not guarantee that every real-world client or route will behave the same way on your network.
 
 ## Shortcuts
@@ -217,23 +231,25 @@ Important:
 - IPv4 only
 - Operator definitions are compiled into the app
 - Files are saved only on demand
-- The scanner supports UDP, TCP, or BOTH DNS probes and defaults to port `53`
-- DNSTT testing is a second-stage check over healthy recursive resolvers, not a raw host scan
+- The current TUI scanner uses UDP compatibility probes and defaults to port `53`
+- DNSTT testing is a second-stage check over score-qualified resolvers, not a raw host scan
 - Leave `DNSTT Pubkey` empty if you only want the tunnel precheck
+- `Test Nearby IPs` expands only one extra `/24` pass from successful original IPv4 seeds
+- `Save Config` updates startup defaults only; it does not start jobs automatically
 
 ## راهنمای فارسی
 
-`range-scout` در اصل ابزاری برای پیدا کردن IPهای در دسترس از رنج اپراتورها است؛ یعنی IPهایی که روی پورت و پروتکل انتخابی شما به DNS پاسخ می‌دهند.
+`range-scout` در اصل ابزاری برای پیدا کردن resolverهای IPv4 از رنج اپراتورها یا تارگت‌های دستی است و بعد resolverهای بهتر را وارد مرحله جداگانه `DNSTT` می‌کند.
 
 نحوه کار:
 
 1. برنامه می‌تواند تارگت‌ها را با `Automatic API Fetch` بگیرد، از `Import TXT` بخواند، یا با `Paste Targets` مستقیم از داخل TUI دریافت کند. اگر اپراتوری انتخاب نشده باشد، فقط `Import TXT` و `Paste Targets` در دسترس هستند.
 2. شما یک یا چند رنج CIDR یا IP تکی را برای اسکن انتخاب می‌کنید.
-3. اسکنر هر هاست را با `UDP` یا `TCP` یا `BOTH` روی پورتی که مشخص می‌کنید بررسی می‌کند.
-4. اگر یک هاست به DNS پاسخ بدهد، به عنوان یک IP کاندید ثبت می‌شود.
-5. بعد از آن برنامه بررسی می‌کند که recursion کار می‌کند یا نه و همچنین با استفاده از آدرس‌های probe که شما وارد می‌کنید پایداری resolver را می‌سنجد.
-6. در صورت نیاز، فقط resolverهای recursive و stable با تنظیمات `DNSTT` تست می‌شوند.
-7. بعد از تمام شدن اسکن می‌توانید IPهای پیدا شده را خروجی بگیرید.
+3. اسکنر هر هاست را فعلا با `UDP` روی پورتی که مشخص می‌کنید بررسی می‌کند.
+4. اگر یک هاست به DNS پاسخ بدهد، شش probe به سبک SlipNet روی آن اجرا می‌شود و یک tunnel score از `0` تا `6` می‌گیرد.
+5. فقط resolverهایی که به `Score Threshold` برسند وارد مرحله `DNSTT` می‌شوند.
+6. بعد از اسکن، یک صفحه جداگانه برای `DNSTT` باز می‌شود که در آن می‌توانید tunnel-only یا تست کامل end-to-end اجرا کنید.
+7. بعد از تمام شدن هر مرحله می‌توانید خروجی همان مرحله را بگیرید.
 
 چه کاری انجام بدهید:
 
@@ -241,19 +257,23 @@ Important:
 2. اگر از فایل یا paste استفاده می‌کنید، در هر خط فقط یک `IPv4 CIDR` یا `IPv4` تکی قرار دهید. خط خالی و `#` نادیده گرفته می‌شود.
 3. با `Pick Targets` فقط تارگت‌هایی را انتخاب کنید که واقعا می‌خواهید اسکن شوند. به صورت پیش‌فرض همه تارگت‌های لودشده انتخاب می‌شوند و داخل پنجره انتخاب هم گزینه `Select All` و `Deselect All` دارید. برنامه به صورت خودکار همه هاست‌های قابل اسکن داخل همان انتخاب را بررسی می‌کند و دیگر فیلد جداگانه‌ای برای host limit ندارد.
 4. اگر نیاز خاصی ندارید، پورت را روی `53` نگه دارید.
-5. اگر تست معمول DNS می‌خواهید از `UDP` استفاده کنید، اگر فقط TCP می‌خواهید `TCP` را انتخاب کنید، و اگر می‌خواهید اول UDP و بعد TCP امتحان شود از `BOTH` استفاده کنید.
-6. در فیلد `Recursion Host` فقط نام هاست را بدون `http://` یا `https://` وارد کنید و برای اولین تست recursive lookup از یک هاست بیرون از شبکه محدود استفاده کنید.
-7. برای `Probe Host`ها نام‌هایی را وارد کنید که از داخل شبکه محدود مورد نظر شما واقعا قابل دسترس باشند. این آدرس‌ها برای تشخیص stable recursive resolution استفاده می‌شوند.
-8. اگر تست `DNSTT` می‌خواهید، `DNSTT Domain` را وارد کنید. اگر فقط precheck می‌خواهید، `DNSTT Pubkey` را خالی بگذارید. اگر تست کامل end-to-end می‌خواهید، `DNSTT Pubkey` را هم وارد کنید.
-9. فیلد `E2E URL` مشخص می‌کند بعد از بالا آمدن پراکسی `SOCKS5` محلی، چه آدرس `HTTP/HTTPS` از داخل تانل درخواست شود. مقدار پیش‌فرض `http://www.gstatic.com/generate_204` است.
-10. فیلد `Query Size` را خالی بگذارید مگر این که بخواهید اندازه payload پرس‌وجوهای DNSTT را کمتر کنید.
-11. اول اسکن را اجرا کنید، بعد `Test DNSTT` را بزنید.
-12. در پایان نتیجه‌ها را خروجی بگیرید.
+5. در اسکن فعلی برنامه از probeهای `UDP` استفاده می‌شود و فیلد `DNSTT Domain` از همان مرحله روی tunnel score اثر دارد، پس قبل از اسکن آن را درست تنظیم کنید.
+6. فیلد `Query Size` را خالی بگذارید مگر این که بخواهید اندازه payload پرس‌وجوهای DNSTT را کمتر کنید.
+7. با `Score Threshold` مشخص می‌کنید چه resolverهایی برای مرحله `DNSTT` به اندازه کافی خوب محسوب شوند.
+8. اول اسکن را اجرا کنید، بعد `Test DNSTT` را بزنید تا وارد صفحه جداگانه `DNSTT` شوید.
+9. اگر فقط precheck می‌خواهید، `DNSTT Pubkey` را خالی بگذارید. اگر تست کامل end-to-end می‌خواهید، `DNSTT Pubkey` را هم وارد کنید.
+10. فیلد `E2E URL` مشخص می‌کند بعد از بالا آمدن پراکسی `SOCKS5` محلی، چه آدرس `HTTP/HTTPS` از داخل تانل درخواست شود. مقدار پیش‌فرض `http://www.gstatic.com/generate_204` است.
+11. اگر SOCKS5 سمت سرور نیاز به احراز هویت دارد، `SOCKS Username` و `SOCKS Password` را در صفحه `DNSTT` وارد کنید.
+12. اگر `Test Nearby IPs` را روی `Yes` بگذارید، هر IPv4 موفق اصلی یک بار دیگر بقیه IPهای همان `/24` را برای DNSTT امتحان می‌کند. IPهایی که از nearby پیدا می‌شوند دوباره expand نمی‌شوند.
+13. روی صفحه اسکن از `Export` و روی صفحه DNSTT از `Export Passed` یا `Copy Passed` استفاده کنید.
+14. اگر می‌خواهید همین تنظیمات دفعه بعد هم لود شوند، `Save Config` را بزنید.
 
 نکته مهم:
 
 - این ابزار برای پیدا کردن IPهای در دسترس و resolverهای کاندید است.
-- تست `DNSTT` فقط روی resolverهای سالم مرحله قبل اجرا می‌شود، نه روی همه هاست‌ها.
+- تست `DNSTT` فقط روی resolverهایی اجرا می‌شود که در اسکن قبلی به `Score Threshold` رسیده باشند، نه روی همه هاست‌ها.
 - برای تست کامل end-to-end دیگر به باینری جداگانه `dnstt-client` نیاز نیست و runtime به‌صورت embedded داخل برنامه اجرا می‌شود.
 - تست end-to-end حالا مثل SlipNet با یک درخواست `HTTP/HTTPS` از داخل پراکسی `SOCKS5` محلی انجام می‌شود و پاسخ موفق یعنی کد وضعیت `2xx` یا `3xx` از `E2E URL` برگشته باشد.
+- اگر سرویس SOCKS5 مقصد نیاز به username/password داشته باشد، برنامه از فیلدهای `SOCKS Username` و `SOCKS Password` برای handshake استفاده می‌کند.
+- در صفحه `DNSTT`، گزینه `Export Passed` علاوه بر فایل resolverهای موفق، یک فایل failure برای resolverهای checked-but-failed هم می‌سازد.
 - مثبت بودن نتیجه در این برنامه باز هم تضمین کامل برای همه مسیرهای واقعی شبکه شما نیست.
