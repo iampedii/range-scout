@@ -34,6 +34,8 @@ type Config struct {
 	Pubkey         string
 	QuerySize      int
 	E2EURL         string
+	SOCKSUsername  string
+	SOCKSPassword  string
 	ScoreThreshold int
 	TestNearbyIPs  bool
 	BasePrefixes   []string
@@ -180,8 +182,12 @@ func prepareConfig(resolvers []model.Resolver, cfg Config) (Config, []int, error
 			return Config{}, nil, fmt.Errorf("dnstt e2e timeout must be greater than zero")
 		}
 		cfg.E2EURL = strings.TrimSpace(cfg.E2EURL)
+		cfg.SOCKSUsername = strings.TrimSpace(cfg.SOCKSUsername)
 		if cfg.E2EURL == "" {
 			cfg.E2EURL = DefaultE2ETestURL
+		}
+		if cfg.SOCKSUsername == "" && cfg.SOCKSPassword != "" {
+			return Config{}, nil, fmt.Errorf("dnstt socks password requires a socks username")
 		}
 		request, err := http.NewRequest(http.MethodGet, cfg.E2EURL, nil)
 		if err != nil || request.URL == nil || request.URL.Host == "" {
@@ -216,7 +222,7 @@ func runResolverCheck(ctx context.Context, resolver model.Resolver, cfg Config, 
 		return resolver
 	}
 
-	e2eOK, tunnelMS, e2eMS, e2eErr := dnsttCheck(ctx, resolver.IP, cfg.Port, cfg.Domain, cfg.Pubkey, cfg.E2ETimeout, cfg.QuerySize, cfg.E2EURL, ports)
+	e2eOK, tunnelMS, e2eMS, e2eErr := dnsttCheck(ctx, resolver.IP, cfg.Port, cfg.Domain, cfg.Pubkey, cfg.E2ETimeout, cfg.QuerySize, cfg.E2EURL, cfg.SOCKSUsername, cfg.SOCKSPassword, ports)
 	if tunnelMS > 0 {
 		resolver.DNSTTTunnelMillis = tunnelMS
 		resolver.DNSTTTunnelOK = true
@@ -494,7 +500,7 @@ func tunnelCheck(ctx context.Context, resolverIP string, port int, domain string
 	}
 }
 
-func dnsttCheck(ctx context.Context, resolverIP string, resolverPort int, domain, pubkey string, timeout time.Duration, querySize int, e2eURL string, ports chan int) (bool, int64, int64, error) {
+func dnsttCheck(ctx context.Context, resolverIP string, resolverPort int, domain, pubkey string, timeout time.Duration, querySize int, e2eURL string, socksUsername string, socksPassword string, ports chan int) (bool, int64, int64, error) {
 	var port int
 	select {
 	case port = <-ports:
@@ -547,7 +553,7 @@ func dnsttCheck(ctx context.Context, resolverIP string, resolverPort int, domain
 	}
 
 	tunnelMS := roundMillis(time.Since(start))
-	if err := verifyHTTPThroughSOCKS5(checkCtx, addr, e2eURL); err != nil {
+	if err := verifyHTTPThroughSOCKS5(checkCtx, addr, e2eURL, socksUsername, socksPassword); err != nil {
 		if checkCtx.Err() != nil {
 			return false, tunnelMS, roundMillis(time.Since(start)), fmt.Errorf("dnstt e2e timed out")
 		}
@@ -589,8 +595,8 @@ func normalizeScoreThreshold(value int) int {
 	}
 }
 
-func verifyHTTPThroughSOCKS5(ctx context.Context, addr string, testURL string) error {
-	dialer, err := proxy.SOCKS5("tcp", addr, nil, proxy.Direct)
+func verifyHTTPThroughSOCKS5(ctx context.Context, addr string, testURL string, username string, password string) error {
+	dialer, err := proxy.SOCKS5("tcp", addr, socks5Auth(username, password), proxy.Direct)
 	if err != nil {
 		return fmt.Errorf("create socks5 dialer: %w", err)
 	}
@@ -637,6 +643,16 @@ func verifyHTTPThroughSOCKS5(ctx context.Context, addr string, testURL string) e
 	}
 
 	return nil
+}
+
+func socks5Auth(username string, password string) *proxy.Auth {
+	if strings.TrimSpace(username) == "" {
+		return nil
+	}
+	return &proxy.Auth{
+		User:     username,
+		Password: password,
+	}
 }
 
 func queryRaw(ctx context.Context, resolver string, port int, domain string, qtype uint16, timeout time.Duration) (*dns.Msg, bool) {

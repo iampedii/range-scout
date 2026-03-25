@@ -46,6 +46,8 @@ type dnsttStageConfig struct {
 	ScoreThreshold configValue `json:"scoreThreshold"`
 	E2EURL         configValue `json:"e2eURL"`
 	TestNearbyIPs  configValue `json:"testNearbyIPs"`
+	SOCKSUsername  configValue `json:"socksUsername"`
+	SOCKSPassword  configValue `json:"socksPassword"`
 	E2EPort        configValue `json:"e2ePort"`
 }
 
@@ -164,6 +166,8 @@ func (u *ui) currentAppConfig() appConfig {
 			ScoreThreshold: configValue{Value: u.dnsttScoreThreshold, Set: true},
 			E2EURL:         configValue{Value: u.dnsttE2EURL, Set: true},
 			TestNearbyIPs:  configValue{Value: normalizeYesNoValue(u.dnsttNearbyIPs), Set: true},
+			SOCKSUsername:  configValue{Value: u.dnsttSOCKSUsername, Set: true},
+			SOCKSPassword:  configValue{Value: u.dnsttSOCKSPassword, Set: true},
 		},
 	}
 }
@@ -259,6 +263,12 @@ func (u *ui) applyAppConfig(cfg appConfig, configDir string) {
 	}
 	if cfg.DNSTTConfig.TestNearbyIPs.Set {
 		u.dnsttNearbyIPs = normalizeYesNoValue(cfg.DNSTTConfig.TestNearbyIPs.Value)
+	}
+	if cfg.DNSTTConfig.SOCKSUsername.Set {
+		u.dnsttSOCKSUsername = cfg.DNSTTConfig.SOCKSUsername.Value
+	}
+	if cfg.DNSTTConfig.SOCKSPassword.Set {
+		u.dnsttSOCKSPassword = cfg.DNSTTConfig.SOCKSPassword.Value
 	}
 }
 

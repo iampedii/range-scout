@@ -74,7 +74,7 @@ const (
 	formNoteWrapWidth    = 24
 	formSidebarWrapWidth = 20
 	uiSeparatorLine      = "────────────────────────"
-	uiVersionLabel       = "v0.1.6-rc3"
+	uiVersionLabel       = "v0.1.6"
 	operatorPlaceholder  = "Paste or Import"
 	customOperatorKey    = "custom"
 	customOperatorName   = "Custom Targets"
@@ -157,6 +157,8 @@ type ui struct {
 	dnsttQuerySize      string
 	dnsttScoreThreshold string
 	dnsttE2EURL         string
+	dnsttSOCKSUsername  string
+	dnsttSOCKSPassword  string
 	dnsttNearbyIPs      string
 	configPath          string
 	activityLines       []string
@@ -1002,6 +1004,8 @@ func (u *ui) rebuildForm() {
 		u.form.AddFormItem(u.newYesNoDropDown("Test Nearby IPs", u.dnsttNearbyIPs, func(value string) { u.dnsttNearbyIPs = value }))
 		u.form.AddFormItem(u.newInput("E2E Timeout", u.dnsttE2ETimeoutS, func(value string) { u.dnsttE2ETimeoutS = value }))
 		u.form.AddFormItem(u.newInput("E2E URL", u.dnsttE2EURL, func(value string) { u.dnsttE2EURL = value }))
+		u.form.AddFormItem(u.newInput("SOCKS Username", u.dnsttSOCKSUsername, func(value string) { u.dnsttSOCKSUsername = value }))
+		u.form.AddFormItem(u.newPasswordInput("SOCKS Password", u.dnsttSOCKSPassword, func(value string) { u.dnsttSOCKSPassword = value }))
 
 		u.form.AddFormItem(u.newSectionHeader("Export", ""))
 		if dnsttCompleted {
@@ -1038,6 +1042,12 @@ func (u *ui) rebuildForm() {
 func (u *ui) newInput(label, value string, onChange func(string)) *tview.InputField {
 	field := configureInputFieldClipboard(tview.NewInputField()).SetLabel(label + ": ").SetText(value)
 	field.SetChangedFunc(onChange)
+	return field
+}
+
+func (u *ui) newPasswordInput(label, value string, onChange func(string)) *tview.InputField {
+	field := u.newInput(label, value, onChange)
+	field.SetMaskCharacter('*')
 	return field
 }
 
@@ -1778,6 +1788,7 @@ func (u *ui) renderDetails() {
 		fmt.Fprintf(&builder, "Test Nearby IPs: %s\n", normalizeYesNoValue(u.dnsttNearbyIPs))
 		fmt.Fprintf(&builder, "E2E Timeout: %s s\n", displayDNSTTE2ETimeout(u.dnsttE2ETimeoutS))
 		fmt.Fprintf(&builder, "E2E URL: %s\n", displayDNSTTE2EURL(u.dnsttE2EURL))
+		fmt.Fprintf(&builder, "SOCKS Auth: %s\n", displayDNSTTSOCKSAuth(u.dnsttSOCKSUsername))
 		fmt.Fprintf(&builder, "DNSTT Runtime: %s embedded\n", colorBadge("OK"))
 		builder.WriteString("\n")
 
@@ -2654,6 +2665,11 @@ func (u *ui) dnsttConfig(port int) (dnstt.Config, error) {
 	if request.URL.Scheme != "http" && request.URL.Scheme != "https" {
 		return dnstt.Config{}, fmt.Errorf("e2e url must use http or https")
 	}
+	socksUsername := strings.TrimSpace(u.dnsttSOCKSUsername)
+	socksPassword := u.dnsttSOCKSPassword
+	if strings.TrimSpace(u.dnsttPubkey) != "" && socksUsername == "" && socksPassword != "" {
+		return dnstt.Config{}, fmt.Errorf("socks password requires a socks username")
+	}
 
 	targetPort := port
 	if targetPort <= 0 {
@@ -2678,6 +2694,8 @@ func (u *ui) dnsttConfig(port int) (dnstt.Config, error) {
 		QuerySize:      querySize,
 		ScoreThreshold: scoreThreshold,
 		E2EURL:         e2eURL,
+		SOCKSUsername:  socksUsername,
+		SOCKSPassword:  socksPassword,
 		TestNearbyIPs:  u.dnsttNearbyIPsEnabled(),
 	}, nil
 }
@@ -3389,6 +3407,13 @@ func displayDNSTTE2EURL(value string) string {
 	return text
 }
 
+func displayDNSTTSOCKSAuth(username string) string {
+	if strings.TrimSpace(username) == "" {
+		return "disabled"
+	}
+	return "enabled"
+}
+
 func normalizeYesNoValue(value string) string {
 	switch strings.ToLower(strings.TrimSpace(value)) {
 	case "yes", "true", "1", "on":
@@ -3593,6 +3618,8 @@ func writeDNSTTOptionGuide(builder *strings.Builder, width int) {
 	writeWrappedGuideEntry(builder, width, "CFG", "Test Nearby IPs", "When set to Yes, any successful original IPv4 resolver triggers one follow-up DNSTT pass for the rest of its /24 subnet. Nearby-discovered IPs do not expand again, and IPs already covered by the original scan ranges are skipped.")
 	writeWrappedGuideEntry(builder, width, "CFG", "E2E Timeout", "Timeout in seconds for the embedded DNSTT runtime plus SOCKS5 end-to-end check.")
 	writeWrappedGuideEntry(builder, width, "CFG", "E2E URL", "HTTP or HTTPS URL fetched through the tunnel after the SOCKS5 proxy starts. Default matches SlipNet's `generate_204` probe.")
+	writeWrappedGuideEntry(builder, width, "OPT", "SOCKS Username", "Optional SOCKS5 username used for the E2E HTTP fetch when the remote DNSTT SOCKS service requires authentication.")
+	writeWrappedGuideEntry(builder, width, "OPT", "SOCKS Password", "Optional SOCKS5 password paired with SOCKS Username for authenticated E2E checks.")
 	writeWrappedGuideEntry(builder, width, "ACT", "Start DNSTT", "Runs tunnel checks for qualified resolvers and, when Pubkey is set, the full E2E check too.")
 	writeWrappedGuideEntry(builder, width, "ACT", "Export Passed", "Available after a completed DNSTT run. Saves passed resolvers to the main file and writes checked DNSTT failures to a paired failures file.")
 	builder.WriteString("\n")

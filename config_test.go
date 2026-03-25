@@ -30,7 +30,9 @@ func TestLoadAppConfigSupportsFlexibleValues(t *testing.T) {
     "querySize": "",
     "scoreThreshold": 3,
     "e2eURL": "https://example.com/generate_204",
-    "testNearbyIPs": "Yes"
+    "testNearbyIPs": "Yes",
+    "socksUsername": "scanner-user",
+    "socksPassword": "scanner-pass"
   }
 }`
 	if err := os.WriteFile(configPath, []byte(configJSON), 0o600); err != nil {
@@ -66,6 +68,12 @@ func TestLoadAppConfigSupportsFlexibleValues(t *testing.T) {
 	if !cfg.DNSTTConfig.TestNearbyIPs.Set || cfg.DNSTTConfig.TestNearbyIPs.Value != "Yes" {
 		t.Fatalf("unexpected DNSTT nearby setting: %+v", cfg.DNSTTConfig.TestNearbyIPs)
 	}
+	if !cfg.DNSTTConfig.SOCKSUsername.Set || cfg.DNSTTConfig.SOCKSUsername.Value != "scanner-user" {
+		t.Fatalf("unexpected DNSTT socks username config: %+v", cfg.DNSTTConfig.SOCKSUsername)
+	}
+	if !cfg.DNSTTConfig.SOCKSPassword.Set || cfg.DNSTTConfig.SOCKSPassword.Value != "scanner-pass" {
+		t.Fatalf("unexpected DNSTT socks password config: %+v", cfg.DNSTTConfig.SOCKSPassword)
+	}
 }
 
 func TestApplyAppConfigSetsUIState(t *testing.T) {
@@ -97,6 +105,8 @@ func TestApplyAppConfigSetsUIState(t *testing.T) {
 			ScoreThreshold: configured("4"),
 			E2EURL:         configured("https://example.com/generate_204"),
 			TestNearbyIPs:  configured("Yes"),
+			SOCKSUsername:  configured("scanner-user"),
+			SOCKSPassword:  configured("scanner-pass"),
 		},
 	}, configDir)
 
@@ -116,8 +126,8 @@ func TestApplyAppConfigSetsUIState(t *testing.T) {
 	if u.scanProtocol != "both" || u.scanRecursionURL != "cloudflare.com" || u.scanProbeURL1 != "github.com" || u.scanProbeURL2 != "example.com" {
 		t.Fatalf("unexpected scan host config: protocol=%q recursion=%q probe1=%q probe2=%q", u.scanProtocol, u.scanRecursionURL, u.scanProbeURL1, u.scanProbeURL2)
 	}
-	if u.dnsttDomain != "t.example.com" || u.dnsttPubkey != "deadbeef" || u.dnsttTimeoutMS != "4500" || u.dnsttE2ETimeoutS != "25" || u.dnsttQuerySize != "1400" || u.dnsttScoreThreshold != "4" || u.dnsttE2EURL != "https://example.com/generate_204" || u.dnsttNearbyIPs != yesOption {
-		t.Fatalf("unexpected DNSTT config: domain=%q pubkey=%q timeout=%q e2eTimeout=%q querySize=%q threshold=%q e2eURL=%q nearby=%q", u.dnsttDomain, u.dnsttPubkey, u.dnsttTimeoutMS, u.dnsttE2ETimeoutS, u.dnsttQuerySize, u.dnsttScoreThreshold, u.dnsttE2EURL, u.dnsttNearbyIPs)
+	if u.dnsttDomain != "t.example.com" || u.dnsttPubkey != "deadbeef" || u.dnsttTimeoutMS != "4500" || u.dnsttE2ETimeoutS != "25" || u.dnsttQuerySize != "1400" || u.dnsttScoreThreshold != "4" || u.dnsttE2EURL != "https://example.com/generate_204" || u.dnsttNearbyIPs != yesOption || u.dnsttSOCKSUsername != "scanner-user" || u.dnsttSOCKSPassword != "scanner-pass" {
+		t.Fatalf("unexpected DNSTT config: domain=%q pubkey=%q timeout=%q e2eTimeout=%q querySize=%q threshold=%q e2eURL=%q nearby=%q socksUser=%q socksPass=%q", u.dnsttDomain, u.dnsttPubkey, u.dnsttTimeoutMS, u.dnsttE2ETimeoutS, u.dnsttQuerySize, u.dnsttScoreThreshold, u.dnsttE2EURL, u.dnsttNearbyIPs, u.dnsttSOCKSUsername, u.dnsttSOCKSPassword)
 	}
 }
 
@@ -144,6 +154,8 @@ func TestSaveAppConfigRoundTripsCurrentUIState(t *testing.T) {
 	u.dnsttScoreThreshold = "5"
 	u.dnsttE2EURL = "https://example.com/generate_204"
 	u.dnsttNearbyIPs = yesOption
+	u.dnsttSOCKSUsername = "scanner-user"
+	u.dnsttSOCKSPassword = "scanner-pass"
 
 	if err := saveAppConfig(configPath, u.currentAppConfig()); err != nil {
 		t.Fatalf("saveAppConfig returned error: %v", err)
@@ -177,6 +189,12 @@ func TestSaveAppConfigRoundTripsCurrentUIState(t *testing.T) {
 	}
 	if got := cfg.DNSTTConfig.TestNearbyIPs.Value; got != yesOption {
 		t.Fatalf("unexpected saved nearby setting: %q", got)
+	}
+	if got := cfg.DNSTTConfig.SOCKSUsername.Value; got != "scanner-user" {
+		t.Fatalf("unexpected saved socks username value: %q", got)
+	}
+	if got := cfg.DNSTTConfig.SOCKSPassword.Value; got != "scanner-pass" {
+		t.Fatalf("unexpected saved socks password value: %q", got)
 	}
 }
 

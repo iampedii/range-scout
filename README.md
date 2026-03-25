@@ -59,7 +59,7 @@ The git tag is the release source of truth. This matches a normal GitFlow
 process:
 
 - tag `v0.1.6` for a final release
-- tag `v0.1.6-rc3` for the current release candidate
+- tag `v0.1.6-rcN` for a release candidate
 
 To build a release artifact from the current tag:
 
@@ -75,7 +75,7 @@ make release-windows
 
 Release builds are intentionally strict:
 
-- `HEAD` must be exactly on a tag such as `v0.1.6` or `v0.1.6-rc3`
+- `HEAD` must be exactly on a tag such as `v0.1.6` or `v0.1.6-rcN`
 - the git worktree must be clean
 
 If those checks pass, the artifact filename will match the release tag exactly.
@@ -140,7 +140,7 @@ Notes:
 - Relative import paths are resolved relative to the `config.json` directory.
 - `Save Config` keeps import paths relative to the config file when possible, so shared configs stay portable.
 - The config file sets startup defaults; it does not auto-run imports, scans, or DNSTT.
-- Ask bug reporters to include the version shown in the header, for example `v0.1.6-rc3`.
+- Ask bug reporters to include the version shown in the header, for example `v0.1.6`.
 
 ## Quick Guide
 

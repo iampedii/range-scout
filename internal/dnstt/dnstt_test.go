@@ -1,10 +1,13 @@
 package dnstt
 
 import (
+	"bufio"
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net"
+	"net/http"
 	"strings"
 	"testing"
 	"time"
@@ -256,8 +259,61 @@ func TestPrepareConfigAllowsBlankE2EURLInTunnelOnlyMode(t *testing.T) {
 	}
 }
 
+func TestPrepareConfigRejectsSOCKSPasswordWithoutUsernameWhenE2EEnabled(t *testing.T) {
+	_, _, err := prepareConfig([]model.Resolver{
+		{IP: "198.51.100.10", TunnelScore: 6},
+	}, Config{
+		Workers:       1,
+		Timeout:       500 * time.Millisecond,
+		E2ETimeout:    5 * time.Second,
+		Domain:        "t.example.com",
+		Pubkey:        "deadbeef",
+		SOCKSPassword: "scanner-pass",
+	})
+	if err == nil {
+		t.Fatal("expected socks auth validation error")
+	}
+	if !strings.Contains(err.Error(), "socks username") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestVerifyHTTPThroughSOCKS5SupportsAuthenticatedProxy(t *testing.T) {
+	addr, attempts, shutdown := startTestSOCKS5Server(t, "scanner-user", "scanner-pass")
+	defer shutdown()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+
+	if err := verifyHTTPThroughSOCKS5(ctx, addr, "http://example.com/generate_204", "scanner-user", "scanner-pass"); err != nil {
+		t.Fatalf("verifyHTTPThroughSOCKS5 returned error: %v", err)
+	}
+
+	attempt := <-attempts
+	if attempt.Username != "scanner-user" || attempt.Password != "scanner-pass" {
+		t.Fatalf("unexpected socks auth attempt: %#v", attempt)
+	}
+}
+
+func TestVerifyHTTPThroughSOCKS5FailsWithoutCredentialsWhenProxyRequiresAuth(t *testing.T) {
+	addr, _, shutdown := startTestSOCKS5Server(t, "scanner-user", "scanner-pass")
+	defer shutdown()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+
+	if err := verifyHTTPThroughSOCKS5(ctx, addr, "http://example.com/generate_204", "", ""); err == nil {
+		t.Fatal("expected verifyHTTPThroughSOCKS5 to fail without required socks auth")
+	}
+}
+
 func nilContext() context.Context {
 	return context.Background()
+}
+
+type socksAuthAttempt struct {
+	Username string
+	Password string
 }
 
 func startTestDNSServer(t *testing.T, handler dns.HandlerFunc) (int, func()) {
@@ -292,4 +348,169 @@ func startTestDNSServer(t *testing.T, handler dns.HandlerFunc) (int, func()) {
 	}
 
 	return port, shutdown
+}
+
+func startTestSOCKS5Server(t *testing.T, username string, password string) (string, <-chan socksAuthAttempt, func()) {
+	t.Helper()
+
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("Listen returned error: %v", err)
+	}
+
+	attempts := make(chan socksAuthAttempt, 1)
+	errCh := make(chan error, 1)
+	go func() {
+		conn, err := listener.Accept()
+		if err != nil {
+			errCh <- err
+			return
+		}
+		errCh <- handleTestSOCKS5Conn(conn, username, password, attempts)
+	}()
+
+	shutdown := func() {
+		_ = listener.Close()
+		select {
+		case err := <-errCh:
+			if err != nil && !errors.Is(err, net.ErrClosed) && !strings.Contains(err.Error(), "use of closed network connection") {
+				t.Fatalf("socks5 server returned error: %v", err)
+			}
+		case <-time.After(500 * time.Millisecond):
+			t.Fatal("timed out waiting for socks5 server shutdown")
+		}
+	}
+
+	return listener.Addr().String(), attempts, shutdown
+}
+
+func handleTestSOCKS5Conn(conn net.Conn, username string, password string, attempts chan<- socksAuthAttempt) error {
+	defer conn.Close()
+
+	reader := bufio.NewReader(conn)
+
+	var header [2]byte
+	if _, err := io.ReadFull(reader, header[:]); err != nil {
+		return err
+	}
+	if header[0] != 0x05 {
+		return fmt.Errorf("unexpected socks version %d", header[0])
+	}
+
+	methods := make([]byte, int(header[1]))
+	if _, err := io.ReadFull(reader, methods); err != nil {
+		return err
+	}
+
+	method := byte(0x00)
+	if username != "" {
+		method = 0x02
+		if !containsByte(methods, method) {
+			if _, err := conn.Write([]byte{0x05, 0xff}); err != nil {
+				return err
+			}
+			return nil
+		}
+	}
+	if _, err := conn.Write([]byte{0x05, method}); err != nil {
+		return err
+	}
+
+	if method == 0x02 {
+		var authHeader [2]byte
+		if _, err := io.ReadFull(reader, authHeader[:]); err != nil {
+			return err
+		}
+		if authHeader[0] != 0x01 {
+			return fmt.Errorf("unexpected auth version %d", authHeader[0])
+		}
+
+		usernameBytes := make([]byte, int(authHeader[1]))
+		if _, err := io.ReadFull(reader, usernameBytes); err != nil {
+			return err
+		}
+
+		passwordLen, err := reader.ReadByte()
+		if err != nil {
+			return err
+		}
+		passwordBytes := make([]byte, int(passwordLen))
+		if _, err := io.ReadFull(reader, passwordBytes); err != nil {
+			return err
+		}
+
+		attempt := socksAuthAttempt{
+			Username: string(usernameBytes),
+			Password: string(passwordBytes),
+		}
+		attempts <- attempt
+
+		status := byte(0x00)
+		if attempt.Username != username || attempt.Password != password {
+			status = 0x01
+		}
+		if _, err := conn.Write([]byte{0x01, status}); err != nil {
+			return err
+		}
+		if status != 0x00 {
+			return nil
+		}
+	}
+
+	var requestHeader [4]byte
+	if _, err := io.ReadFull(reader, requestHeader[:]); err != nil {
+		return err
+	}
+	if requestHeader[0] != 0x05 {
+		return fmt.Errorf("unexpected request version %d", requestHeader[0])
+	}
+	if requestHeader[1] != 0x01 {
+		return fmt.Errorf("unexpected socks command %d", requestHeader[1])
+	}
+
+	switch requestHeader[3] {
+	case 0x01:
+		if _, err := io.CopyN(io.Discard, reader, 4); err != nil {
+			return err
+		}
+	case 0x03:
+		hostLen, err := reader.ReadByte()
+		if err != nil {
+			return err
+		}
+		if _, err := io.CopyN(io.Discard, reader, int64(hostLen)); err != nil {
+			return err
+		}
+	case 0x04:
+		if _, err := io.CopyN(io.Discard, reader, 16); err != nil {
+			return err
+		}
+	default:
+		return fmt.Errorf("unexpected address type %d", requestHeader[3])
+	}
+	if _, err := io.CopyN(io.Discard, reader, 2); err != nil {
+		return err
+	}
+
+	if _, err := conn.Write([]byte{0x05, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00}); err != nil {
+		return err
+	}
+
+	request, err := http.ReadRequest(reader)
+	if err != nil {
+		return err
+	}
+	_ = request.Body.Close()
+
+	_, err = io.WriteString(conn, "HTTP/1.1 204 No Content\r\nContent-Length: 0\r\n\r\n")
+	return err
+}
+
+func containsByte(values []byte, target byte) bool {
+	for _, value := range values {
+		if value == target {
+			return true
+		}
+	}
+	return false
 }

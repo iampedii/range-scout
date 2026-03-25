@@ -299,6 +299,15 @@ func TestScanConfigNormalizesProbeURLs(t *testing.T) {
 }
 
 func TestNewUIDefaultsScannerPortAndProtocol(t *testing.T) {
+	previousWorkingDirReader := workingDirReader
+	previousExecutablePathReader := executablePathReader
+	workingDirReader = func() (string, error) { return t.TempDir(), nil }
+	executablePathReader = func() (string, error) { return filepath.Join(t.TempDir(), "range-scout"), nil }
+	defer func() {
+		workingDirReader = previousWorkingDirReader
+		executablePathReader = previousExecutablePathReader
+	}()
+
 	u := newUI()
 
 	if u.scanPort != "53" {
@@ -318,6 +327,9 @@ func TestNewUIDefaultsScannerPortAndProtocol(t *testing.T) {
 	}
 	if u.dnsttE2EURL != dnstt.DefaultE2ETestURL {
 		t.Fatalf("unexpected default DNSTT e2e url: %q", u.dnsttE2EURL)
+	}
+	if u.dnsttSOCKSUsername != "" || u.dnsttSOCKSPassword != "" {
+		t.Fatalf("expected blank default DNSTT socks auth, got username=%q password=%q", u.dnsttSOCKSUsername, u.dnsttSOCKSPassword)
 	}
 	if u.dnsttNearbyIPs != noOption {
 		t.Fatalf("unexpected default DNSTT nearby setting: %q", u.dnsttNearbyIPs)
@@ -415,6 +427,8 @@ func TestDNSTTConfigUsesConfiguredE2EURL(t *testing.T) {
 	u.dnsttDomain = "d.example.com"
 	u.dnsttPubkey = "deadbeef"
 	u.dnsttE2EURL = "https://example.com/generate_204"
+	u.dnsttSOCKSUsername = "scanner-user"
+	u.dnsttSOCKSPassword = "scanner-pass"
 	u.dnsttNearbyIPs = yesOption
 
 	cfg, err := u.dnsttConfig(53)
@@ -424,8 +438,27 @@ func TestDNSTTConfigUsesConfiguredE2EURL(t *testing.T) {
 	if cfg.E2EURL != "https://example.com/generate_204" {
 		t.Fatalf("unexpected e2e url: %q", cfg.E2EURL)
 	}
+	if cfg.SOCKSUsername != "scanner-user" || cfg.SOCKSPassword != "scanner-pass" {
+		t.Fatalf("unexpected socks auth config: username=%q password=%q", cfg.SOCKSUsername, cfg.SOCKSPassword)
+	}
 	if !cfg.TestNearbyIPs {
 		t.Fatal("expected nearby IP testing to be enabled")
+	}
+}
+
+func TestDNSTTConfigRejectsSOCKSPasswordWithoutUsernameWhenE2EEnabled(t *testing.T) {
+	u := newUI()
+	u.dnsttDomain = "d.example.com"
+	u.dnsttPubkey = "deadbeef"
+	u.dnsttSOCKSUsername = ""
+	u.dnsttSOCKSPassword = "scanner-pass"
+
+	_, err := u.dnsttConfig(53)
+	if err == nil {
+		t.Fatal("expected socks auth validation error")
+	}
+	if !strings.Contains(err.Error(), "socks username") {
+		t.Fatalf("unexpected error: %v", err)
 	}
 }
 
@@ -1231,6 +1264,9 @@ func TestOpenDNSTTSetupShowsDedicatedScreen(t *testing.T) {
 	}
 	if !hasFormItemLabel(u, "DNSTT Pubkey") {
 		t.Fatal("expected DNSTT pubkey field on DNSTT screen")
+	}
+	if !hasFormItemLabel(u, "SOCKS Username") || !hasFormItemLabel(u, "SOCKS Password") {
+		t.Fatal("expected DNSTT screen to show SOCKS auth fields")
 	}
 	if !hasFormItemLabel(u, "Test Nearby IPs") {
 		t.Fatal("expected DNSTT nearby IP dropdown on DNSTT screen")
