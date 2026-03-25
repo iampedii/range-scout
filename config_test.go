@@ -178,8 +178,11 @@ func TestSaveAppConfigRoundTripsCurrentUIState(t *testing.T) {
 	if got := cfg.ScanConfig.Workers.Value; got != "768" {
 		t.Fatalf("unexpected saved workers value: %q", got)
 	}
-	if got := cfg.ScanConfig.Protocol.Value; got != "tcp" {
-		t.Fatalf("unexpected saved protocol value: %q", got)
+	if cfg.ScanConfig.Protocol.Set {
+		t.Fatalf("expected legacy protocol key to be omitted from saved config, got %+v", cfg.ScanConfig.Protocol)
+	}
+	if cfg.ScanConfig.RecursionHost.Set || cfg.ScanConfig.ProbeHost1.Set || cfg.ScanConfig.ProbeHost2.Set {
+		t.Fatalf("expected legacy scan host keys to be omitted from saved config: recursion=%+v probe1=%+v probe2=%+v", cfg.ScanConfig.RecursionHost, cfg.ScanConfig.ProbeHost1, cfg.ScanConfig.ProbeHost2)
 	}
 	if got := cfg.DNSTTConfig.E2EURL.Value; got != "https://example.com/generate_204" {
 		t.Fatalf("unexpected saved e2e url value: %q", got)
@@ -195,6 +198,9 @@ func TestSaveAppConfigRoundTripsCurrentUIState(t *testing.T) {
 	}
 	if got := cfg.DNSTTConfig.SOCKSPassword.Value; got != "scanner-pass" {
 		t.Fatalf("unexpected saved socks password value: %q", got)
+	}
+	if cfg.DNSTTConfig.E2EPort.Set {
+		t.Fatalf("expected legacy e2ePort key to be omitted from saved config, got %+v", cfg.DNSTTConfig.E2EPort)
 	}
 }
 

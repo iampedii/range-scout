@@ -21,7 +21,6 @@ import (
 
 const (
 	defaultEDNSBufSize = 1232
-	localSocksBasePort = 10800
 	DefaultE2ETestURL  = "http://www.gstatic.com/generate_204"
 )
 
@@ -73,6 +72,7 @@ type embeddedClient interface {
 	Start() error
 	Stop()
 	IsRunning() bool
+	ListenAddr() string
 }
 
 var newEmbeddedClient = func(dnsAddr, tunnelDomain, publicKey, listenAddr string) (embeddedClient, error) {
@@ -80,6 +80,7 @@ var newEmbeddedClient = func(dnsAddr, tunnelDomain, publicKey, listenAddr string
 }
 
 var runTunnelCheck = tunnelCheck
+var verifySOCKS5HTTP = verifyHTTPThroughSOCKS5
 
 func Test(
 	ctx context.Context,
@@ -106,14 +107,7 @@ func Test(
 	var tunnelOK atomic.Uint64
 	var e2eOK atomic.Uint64
 
-	portPool := make(chan int, cfg.Workers)
-	if strings.TrimSpace(cfg.Pubkey) != "" {
-		for index := 0; index < cfg.Workers; index++ {
-			portPool <- localSocksBasePort + index
-		}
-	}
-
-	runCandidateBatch(ctx, updated, candidates, cfg, portPool, summary.Candidates, &tested, &tunnelOK, &e2eOK, summary.StartedAt, emit)
+	runCandidateBatch(ctx, updated, candidates, cfg, summary.Candidates, &tested, &tunnelOK, &e2eOK, summary.StartedAt, emit)
 
 	if ctx.Err() == nil && cfg.TestNearbyIPs {
 		nearbyResolvers := collectNearbyResolvers(updated, candidates, strings.TrimSpace(cfg.Pubkey) != "", basePrefixes)
@@ -127,7 +121,7 @@ func Test(
 			}
 			summary.Candidates += uint64(len(nearbyIndexes))
 			emitProgress(emit, summary.Candidates, tested.Load(), tunnelOK.Load(), e2eOK.Load(), summary.StartedAt)
-			runCandidateBatch(ctx, updated, nearbyIndexes, cfg, portPool, summary.Candidates, &tested, &tunnelOK, &e2eOK, summary.StartedAt, emit)
+			runCandidateBatch(ctx, updated, nearbyIndexes, cfg, summary.Candidates, &tested, &tunnelOK, &e2eOK, summary.StartedAt, emit)
 		}
 	}
 
@@ -201,7 +195,7 @@ func prepareConfig(resolvers []model.Resolver, cfg Config) (Config, []int, error
 	return cfg, candidates, nil
 }
 
-func runResolverCheck(ctx context.Context, resolver model.Resolver, cfg Config, ports chan int) model.Resolver {
+func runResolverCheck(ctx context.Context, resolver model.Resolver, cfg Config) model.Resolver {
 	resolver = resetResolverState(resolver)
 	resolver.DNSTTChecked = true
 
@@ -222,7 +216,7 @@ func runResolverCheck(ctx context.Context, resolver model.Resolver, cfg Config, 
 		return resolver
 	}
 
-	e2eOK, tunnelMS, e2eMS, e2eErr := dnsttCheck(ctx, resolver.IP, cfg.Port, cfg.Domain, cfg.Pubkey, cfg.E2ETimeout, cfg.QuerySize, cfg.E2EURL, cfg.SOCKSUsername, cfg.SOCKSPassword, ports)
+	e2eOK, tunnelMS, e2eMS, e2eErr := dnsttCheck(ctx, resolver.IP, cfg.Port, cfg.Domain, cfg.Pubkey, cfg.E2ETimeout, cfg.QuerySize, cfg.E2EURL, cfg.SOCKSUsername, cfg.SOCKSPassword)
 	if tunnelMS > 0 {
 		resolver.DNSTTTunnelMillis = tunnelMS
 		resolver.DNSTTTunnelOK = true
@@ -249,7 +243,6 @@ func runCandidateBatch(
 	updated []model.Resolver,
 	indexes []int,
 	cfg Config,
-	portPool chan int,
 	total uint64,
 	tested *atomic.Uint64,
 	tunnelOK *atomic.Uint64,
@@ -273,7 +266,7 @@ func runCandidateBatch(
 					return
 				}
 
-				resolver := runResolverCheck(ctx, updated[index], cfg, portPool)
+				resolver := runResolverCheck(ctx, updated[index], cfg)
 				updated[index] = resolver
 
 				currentTested := tested.Add(1)
@@ -500,22 +493,12 @@ func tunnelCheck(ctx context.Context, resolverIP string, port int, domain string
 	}
 }
 
-func dnsttCheck(ctx context.Context, resolverIP string, resolverPort int, domain, pubkey string, timeout time.Duration, querySize int, e2eURL string, socksUsername string, socksPassword string, ports chan int) (bool, int64, int64, error) {
-	var port int
-	select {
-	case port = <-ports:
-	case <-ctx.Done():
-		return false, 0, 0, ctx.Err()
-	}
-	defer func() {
-		ports <- port
-	}()
-
+func dnsttCheck(ctx context.Context, resolverIP string, resolverPort int, domain, pubkey string, timeout time.Duration, querySize int, e2eURL string, socksUsername string, socksPassword string) (bool, int64, int64, error) {
 	checkCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
 	start := time.Now()
-	addr := fmt.Sprintf("127.0.0.1:%d", port)
+	addr := "127.0.0.1:0"
 	client, err := newEmbeddedClient(
 		net.JoinHostPort(resolverIP, fmt.Sprintf("%d", resolverPort)),
 		domain,
@@ -540,6 +523,10 @@ func dnsttCheck(ctx context.Context, resolverIP string, resolverPort int, domain
 		if err != nil {
 			return false, 0, roundMillis(time.Since(start)), fmt.Errorf("start embedded dnstt client: %w", err)
 		}
+		addr = strings.TrimSpace(client.ListenAddr())
+		if addr == "" {
+			return false, 0, roundMillis(time.Since(start)), fmt.Errorf("start embedded dnstt client: local listener address unavailable")
+		}
 	case <-checkCtx.Done():
 		return false, 0, roundMillis(time.Since(start)), fmt.Errorf("dnstt e2e timed out")
 	}
@@ -553,7 +540,7 @@ func dnsttCheck(ctx context.Context, resolverIP string, resolverPort int, domain
 	}
 
 	tunnelMS := roundMillis(time.Since(start))
-	if err := verifyHTTPThroughSOCKS5(checkCtx, addr, e2eURL, socksUsername, socksPassword); err != nil {
+	if err := verifySOCKS5HTTP(checkCtx, addr, e2eURL, socksUsername, socksPassword); err != nil {
 		if checkCtx.Err() != nil {
 			return false, tunnelMS, roundMillis(time.Since(start)), fmt.Errorf("dnstt e2e timed out")
 		}

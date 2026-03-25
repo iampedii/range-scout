@@ -9,6 +9,7 @@ import (
 	"net"
 	"net/http"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -307,8 +308,127 @@ func TestVerifyHTTPThroughSOCKS5FailsWithoutCredentialsWhenProxyRequiresAuth(t *
 	}
 }
 
+func TestDNSTTCheckUsesDynamicLoopbackPort(t *testing.T) {
+	previousNewEmbeddedClient := newEmbeddedClient
+	previousVerifySOCKS5HTTP := verifySOCKS5HTTP
+	t.Cleanup(func() {
+		newEmbeddedClient = previousNewEmbeddedClient
+		verifySOCKS5HTTP = previousVerifySOCKS5HTTP
+	})
+
+	var requestedAddr string
+	client := &stubEmbeddedClient{}
+	newEmbeddedClient = func(dnsAddr, tunnelDomain, publicKey, listenAddr string) (embeddedClient, error) {
+		requestedAddr = listenAddr
+		client.requestedAddr = listenAddr
+		return client, nil
+	}
+
+	var verifiedAddr string
+	verifySOCKS5HTTP = func(ctx context.Context, addr string, testURL string, username string, password string) error {
+		verifiedAddr = addr
+		return nil
+	}
+
+	ok, tunnelMS, e2eMS, err := dnsttCheck(
+		context.Background(),
+		"198.51.100.10",
+		53,
+		"t.example.com",
+		"deadbeef",
+		2*time.Second,
+		0,
+		DefaultE2ETestURL,
+		"",
+		"",
+	)
+	if err != nil {
+		t.Fatalf("dnsttCheck returned error: %v", err)
+	}
+	if !ok {
+		t.Fatal("expected dnsttCheck to succeed")
+	}
+	if tunnelMS <= 0 || e2eMS <= 0 {
+		t.Fatalf("expected positive timings, got tunnel=%d e2e=%d", tunnelMS, e2eMS)
+	}
+	if requestedAddr != "127.0.0.1:0" {
+		t.Fatalf("expected dynamic loopback listen address, got %q", requestedAddr)
+	}
+	if verifiedAddr == "" || strings.HasSuffix(verifiedAddr, ":0") {
+		t.Fatalf("expected resolved listener address, got %q", verifiedAddr)
+	}
+	if verifiedAddr == requestedAddr {
+		t.Fatalf("expected verify step to use the bound listener address, got %q", verifiedAddr)
+	}
+}
+
 func nilContext() context.Context {
 	return context.Background()
+}
+
+type stubEmbeddedClient struct {
+	mu            sync.Mutex
+	requestedAddr string
+	listener      net.Listener
+	running       bool
+}
+
+func (c *stubEmbeddedClient) SetAuthoritativeMode(bool) {}
+
+func (c *stubEmbeddedClient) SetMaxPayload(int) {}
+
+func (c *stubEmbeddedClient) Start() error {
+	c.mu.Lock()
+	requestedAddr := c.requestedAddr
+	c.mu.Unlock()
+
+	listener, err := net.Listen("tcp", requestedAddr)
+	if err != nil {
+		return err
+	}
+
+	c.mu.Lock()
+	c.listener = listener
+	c.running = true
+	c.mu.Unlock()
+
+	go func() {
+		for {
+			conn, err := listener.Accept()
+			if err != nil {
+				return
+			}
+			_ = conn.Close()
+		}
+	}()
+
+	return nil
+}
+
+func (c *stubEmbeddedClient) Stop() {
+	c.mu.Lock()
+	listener := c.listener
+	c.listener = nil
+	c.running = false
+	c.mu.Unlock()
+	if listener != nil {
+		_ = listener.Close()
+	}
+}
+
+func (c *stubEmbeddedClient) IsRunning() bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.running
+}
+
+func (c *stubEmbeddedClient) ListenAddr() string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.listener != nil {
+		return c.listener.Addr().String()
+	}
+	return c.requestedAddr
 }
 
 type socksAuthAttempt struct {

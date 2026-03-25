@@ -37,6 +37,20 @@ type scanStageConfig struct {
 	ProbeHost2    configValue `json:"probeHost2"`
 }
 
+func (c scanStageConfig) MarshalJSON() ([]byte, error) {
+	type savedScanStageConfig struct {
+		Workers   configValue `json:"workers"`
+		TimeoutMS configValue `json:"timeoutMS"`
+		Port      configValue `json:"port"`
+	}
+
+	return json.Marshal(savedScanStageConfig{
+		Workers:   c.Workers,
+		TimeoutMS: c.TimeoutMS,
+		Port:      c.Port,
+	})
+}
+
 type dnsttStageConfig struct {
 	Domain         configValue `json:"domain"`
 	Pubkey         configValue `json:"pubkey"`
@@ -49,6 +63,34 @@ type dnsttStageConfig struct {
 	SOCKSUsername  configValue `json:"socksUsername"`
 	SOCKSPassword  configValue `json:"socksPassword"`
 	E2EPort        configValue `json:"e2ePort"`
+}
+
+func (c dnsttStageConfig) MarshalJSON() ([]byte, error) {
+	type savedDNSTTStageConfig struct {
+		Domain         configValue `json:"domain"`
+		Pubkey         configValue `json:"pubkey"`
+		TimeoutMS      configValue `json:"timeoutMS"`
+		E2ETimeoutS    configValue `json:"e2eTimeoutS"`
+		QuerySize      configValue `json:"querySize"`
+		ScoreThreshold configValue `json:"scoreThreshold"`
+		E2EURL         configValue `json:"e2eURL"`
+		TestNearbyIPs  configValue `json:"testNearbyIPs"`
+		SOCKSUsername  configValue `json:"socksUsername"`
+		SOCKSPassword  configValue `json:"socksPassword"`
+	}
+
+	return json.Marshal(savedDNSTTStageConfig{
+		Domain:         c.Domain,
+		Pubkey:         c.Pubkey,
+		TimeoutMS:      c.TimeoutMS,
+		E2ETimeoutS:    c.E2ETimeoutS,
+		QuerySize:      c.QuerySize,
+		ScoreThreshold: c.ScoreThreshold,
+		E2EURL:         c.E2EURL,
+		TestNearbyIPs:  c.TestNearbyIPs,
+		SOCKSUsername:  c.SOCKSUsername,
+		SOCKSPassword:  c.SOCKSPassword,
+	})
 }
 
 type configValue struct {
@@ -149,13 +191,9 @@ func (u *ui) currentAppConfig() appConfig {
 			ImportFilePaths: importPaths,
 		},
 		ScanConfig: scanStageConfig{
-			Workers:       configValue{Value: u.scanWorkers, Set: true},
-			TimeoutMS:     configValue{Value: u.scanTimeoutMS, Set: true},
-			Port:          configValue{Value: u.scanPort, Set: true},
-			Protocol:      configValue{Value: u.scanProtocol, Set: true},
-			RecursionHost: configValue{Value: u.scanRecursionURL, Set: true},
-			ProbeHost1:    configValue{Value: u.scanProbeURL1, Set: true},
-			ProbeHost2:    configValue{Value: u.scanProbeURL2, Set: true},
+			Workers:   configValue{Value: u.scanWorkers, Set: true},
+			TimeoutMS: configValue{Value: u.scanTimeoutMS, Set: true},
+			Port:      configValue{Value: u.scanPort, Set: true},
 		},
 		DNSTTConfig: dnsttStageConfig{
 			Domain:         configValue{Value: u.dnsttDomain, Set: true},

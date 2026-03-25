@@ -215,6 +215,15 @@ func (c *Client) IsRunning() bool {
 	return c.running
 }
 
+func (c *Client) ListenAddr() string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.listener != nil {
+		return c.listener.Addr().String()
+	}
+	return c.listenAddr
+}
+
 func (c *Client) serve(ctx context.Context, listener net.Listener, session *smux.Session, conv uint32) {
 	defer c.shutdown()
 

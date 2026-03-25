@@ -60,8 +60,8 @@ That writes `dist/range-scout-windows-amd64.exe`.
 The git tag is the release source of truth. This matches a normal GitFlow
 process:
 
-- tag `v0.1.6` for a final release
-- tag `v0.1.6-rcN` for a release candidate
+- tag `v0.6.1` for a final release
+- tag `v0.6.1-rcN` for a release candidate
 
 To build a release artifact from the current tag:
 
@@ -77,7 +77,7 @@ make release-windows
 
 Release builds are intentionally strict:
 
-- `HEAD` must be exactly on a tag such as `v0.1.6` or `v0.1.6-rcN`
+- `HEAD` must be exactly on a tag such as `v0.6.1` or `v0.6.1-rcN`
 - the git worktree must be clean
 
 If those checks pass, the artifact filename will match the release tag exactly.
@@ -114,11 +114,7 @@ Example:
   "scanConfig": {
     "workers": "256",
     "timeoutMS": "15000",
-    "port": "53",
-    "protocol": "UDP",
-    "recursionHost": "google.com",
-    "probeHost1": "github.com",
-    "probeHost2": "example.com"
+    "port": "53"
   },
   "dnsttConfig": {
     "domain": "t.example.com",
@@ -140,13 +136,13 @@ Notes:
 - `importFilePaths` may be a single string or an object map.
 - The app writes UI field values back as strings when you use `Save Config`.
 - `socksUsername` and `socksPassword` are optional. A SOCKS password without a username is invalid for DNSTT E2E.
-- The current UI reads and writes these startup fields: `workers`, `timeoutMS`, `port`, `protocol`, `recursionHost`, `probeHost1`, `probeHost2`, `domain`, `pubkey`, `timeoutMS`, `e2eTimeoutS`, `querySize`, `scoreThreshold`, `e2eURL`, `testNearbyIPs`, `socksUsername`, and `socksPassword`.
-- `protocol`, `recursionHost`, `probeHost1`, `probeHost2`, and `e2ePort` may still appear in `config.json` for compatibility with older saved configs. The current scanner workflow in the TUI uses UDP-only SlipNet-style compatibility probes.
+- `Save Config` currently writes `workers`, `timeoutMS`, and `port` in `scanConfig`, plus `domain`, `pubkey`, `timeoutMS`, `e2eTimeoutS`, `querySize`, `scoreThreshold`, `e2eURL`, `testNearbyIPs`, `socksUsername`, and `socksPassword` in `dnsttConfig`.
+- `protocol`, `recursionHost`, `probeHost1`, `probeHost2`, and `e2ePort` are treated as legacy compatibility keys. Older configs can still be loaded with them, but current saves no longer write them back out.
 - Use `"default"` to provide a fallback import path for any operator.
 - Relative import paths are resolved relative to the `config.json` directory.
 - `Save Config` keeps import paths relative to the config file when possible, so shared configs stay portable.
 - The config file sets startup defaults; it does not auto-run imports, scans, or DNSTT.
-- Ask bug reporters to include the version shown in the header, for example `v0.1.6`.
+- Ask bug reporters to include the version shown in the header, for example `v0.6.1`.
 
 ## Quick Guide
 
