@@ -119,6 +119,10 @@ func Scan(
 	if cfg.QuerySize < 0 {
 		return model.ScanResult{}, fmt.Errorf("query size must be zero or greater")
 	}
+	protocol, err := ParseProtocol(string(cfg.Protocol))
+	if err != nil {
+		return model.ScanResult{}, err
+	}
 
 	domain := configuredTunnelDomain(cfg.Domain)
 	if domain == "." {
@@ -139,14 +143,14 @@ func Scan(
 		TimeoutMillis:  int(cfg.Timeout.Milliseconds()),
 		HostLimit:      cfg.HostLimit,
 		Port:           port,
-		Protocol:       string(ProtocolUDP),
+		Protocol:       string(protocol),
 		TunnelDomain:   strings.TrimSuffix(domain, "."),
 		QuerySize:      cfg.QuerySize,
 		ScoreThreshold: threshold,
 		StartedAt:      time.Now(),
 	}
 
-	if totalTargets > 0 && DetectTransparentProxy(ctx, domain, 2*time.Second) {
+	if totalTargets > 0 && protocolUsesUDP(protocol) && DetectTransparentProxy(ctx, domain, 2*time.Second) {
 		result.TransparentProxyDetected = true
 		result.Warnings = append(result.Warnings, "transparent DNS proxy detected; results may be inaccurate")
 	}
@@ -200,7 +204,7 @@ func Scan(
 		go func() {
 			defer workerWG.Done()
 			for target := range jobs {
-				resolver, ok := probeResolver(ctx, target, cfg.Timeout, port, domain, cfg.QuerySize, threshold)
+				resolver, ok := probeResolver(ctx, target, cfg.Timeout, port, protocol, domain, cfg.QuerySize, threshold)
 				scanned.Add(1)
 				if ok {
 					currentWorking := working.Add(1)
@@ -284,7 +288,26 @@ func Scan(
 	return result, nil
 }
 
-func probeResolver(ctx context.Context, target scanTarget, timeout time.Duration, port int, domain string, querySize int, threshold int) (model.Resolver, bool) {
+func probeResolver(ctx context.Context, target scanTarget, timeout time.Duration, port int, protocol Protocol, domain string, querySize int, threshold int) (model.Resolver, bool) {
+	if protocol == ProtocolBoth {
+		udpResolver, udpOK := probeResolverOnce(ctx, target, timeout, port, ProtocolUDP, domain, querySize, threshold)
+		tcpResolver, tcpOK := probeResolverOnce(ctx, target, timeout, port, ProtocolTCP, domain, querySize, threshold)
+		switch {
+		case udpOK && tcpOK:
+			return combineProtocolResolvers(udpResolver, tcpResolver), true
+		case udpOK:
+			return udpResolver, true
+		case tcpOK:
+			return tcpResolver, true
+		default:
+			return model.Resolver{}, false
+		}
+	}
+
+	return probeResolverOnce(ctx, target, timeout, port, protocol, domain, querySize, threshold)
+}
+
+func probeResolverOnce(ctx context.Context, target scanTarget, timeout time.Duration, port int, protocol Protocol, domain string, querySize int, threshold int) (model.Resolver, bool) {
 	probeTimeout := timeout
 	if probeTimeout > 1500*time.Millisecond {
 		probeTimeout = 1500 * time.Millisecond
@@ -292,13 +315,13 @@ func probeResolver(ctx context.Context, target scanTarget, timeout time.Duration
 
 	parent := getParentDomain(domain)
 	query := randomLabel(8) + "." + parent
-	response, latencyMS, err := dnsQuery(ctx, target.IP, port, query, dns.TypeA, probeTimeout, 0)
+	response, latencyMS, err := dnsQuery(ctx, target.IP, port, protocol, query, dns.TypeA, probeTimeout, 0)
 	if err != nil || response == nil {
 		return model.Resolver{}, false
 	}
 
 	resolver := model.Resolver{
-		Transport:           string(ProtocolUDP),
+		Transport:           string(protocol),
 		IP:                  target.IP.String(),
 		Prefix:              target.Prefix,
 		DNSReachable:        true,
@@ -313,30 +336,62 @@ func probeResolver(ctx context.Context, target scanTarget, timeout time.Duration
 	wg.Add(6)
 	go func() {
 		defer wg.Done()
-		tunnel.NSSupport = testNS(ctx, target.IP, port, parent, timeout)
+		tunnel.NSSupport = testNS(ctx, target.IP, port, protocol, parent, timeout)
 	}()
 	go func() {
 		defer wg.Done()
-		tunnel.TXTSupport = testTXT(ctx, target.IP, port, domain, timeout)
+		tunnel.TXTSupport = testTXT(ctx, target.IP, port, protocol, domain, timeout)
 	}()
 	go func() {
 		defer wg.Done()
-		tunnel.RandomSub = testRandomSubdomain(ctx, target.IP, port, domain, timeout)
+		tunnel.RandomSub = testRandomSubdomain(ctx, target.IP, port, protocol, domain, timeout)
 	}()
 	go func() {
 		defer wg.Done()
-		tunnel.TunnelRealism = testTunnelRealism(ctx, target.IP, port, domain, timeout, querySize)
+		tunnel.TunnelRealism = testTunnelRealism(ctx, target.IP, port, protocol, domain, timeout, querySize)
 	}()
 	go func() {
 		defer wg.Done()
-		tunnel.EDNS0Support, tunnel.EDNSMaxPayload = testEDNS0(ctx, target.IP, port, domain, timeout)
+		tunnel.EDNS0Support, tunnel.EDNSMaxPayload = testEDNS0(ctx, target.IP, port, protocol, domain, timeout)
 	}()
 	go func() {
 		defer wg.Done()
-		tunnel.NXDOMAINCorrect = testNXDOMAIN(ctx, target.IP, port, timeout)
+		tunnel.NXDOMAINCorrect = testNXDOMAIN(ctx, target.IP, port, protocol, timeout)
 	}()
 	wg.Wait()
 
+	applyTunnelResult(&resolver, tunnel, threshold)
+
+	return resolver, true
+}
+
+func combineProtocolResolvers(left, right model.Resolver) model.Resolver {
+	preferred := left
+	if preferResolver(right, left) {
+		preferred = right
+	}
+
+	combined := preferred
+	combined.Transport = string(ProtocolBoth)
+	combined.DNSReachable = left.DNSReachable || right.DNSReachable
+
+	return combined
+}
+
+func preferResolver(candidate, current model.Resolver) bool {
+	switch {
+	case candidate.TunnelScore != current.TunnelScore:
+		return candidate.TunnelScore > current.TunnelScore
+	case candidate.LatencyMillis > 0 && (current.LatencyMillis <= 0 || candidate.LatencyMillis < current.LatencyMillis):
+		return true
+	case candidate.LatencyMillis != current.LatencyMillis:
+		return false
+	default:
+		return candidate.Transport == string(ProtocolUDP) && current.Transport != string(ProtocolUDP)
+	}
+}
+
+func applyTunnelResult(resolver *model.Resolver, tunnel tunnelTestResult, threshold int) {
 	resolver.TunnelNSSupport = tunnel.NSSupport
 	resolver.TunnelTXTSupport = tunnel.TXTSupport
 	resolver.TunnelRandomSub = tunnel.RandomSub
@@ -347,8 +402,6 @@ func probeResolver(ctx context.Context, target scanTarget, timeout time.Duration
 	resolver.TunnelScore = tunnel.Score()
 	resolver.RecursionAvailable = resolver.TunnelScore >= threshold
 	resolver.Stable = resolver.TunnelScore == 6
-
-	return resolver, true
 }
 
 func DetectTransparentProxy(ctx context.Context, domain string, timeout time.Duration) bool {
@@ -358,7 +411,7 @@ func DetectTransparentProxy(ctx context.Context, domain string, timeout time.Dur
 		wg.Add(1)
 		go func(host string) {
 			defer wg.Done()
-			response, _, err := dnsQuery(ctx, netip.MustParseAddr(host), 53, randomLabel(8)+"."+domain, dns.TypeA, timeout, 0)
+			response, _, err := dnsQuery(ctx, netip.MustParseAddr(host), 53, ProtocolUDP, randomLabel(8)+"."+domain, dns.TypeA, timeout, 0)
 			if err == nil && response != nil {
 				detected.Store(true)
 			}
@@ -368,35 +421,44 @@ func DetectTransparentProxy(ctx context.Context, domain string, timeout time.Dur
 	return detected.Load()
 }
 
-func testNS(ctx context.Context, ip netip.Addr, port int, parentDomain string, timeout time.Duration) bool {
-	response, _, err := dnsQuery(ctx, ip, port, parentDomain, dns.TypeNS, timeout, 0)
+func testNS(ctx context.Context, ip netip.Addr, port int, protocol Protocol, parentDomain string, timeout time.Duration) bool {
+	response, _, err := dnsQuery(ctx, ip, port, protocol, parentDomain, dns.TypeNS, timeout, 0)
 	if err != nil || response == nil {
 		return false
 	}
-	var nsHost string
-	for _, answer := range response.Answer {
-		if record, ok := answer.(*dns.NS); ok {
-			nsHost = record.Ns
-			break
-		}
-	}
+	nsHost := firstNSHost(response)
 	if nsHost == "" {
 		return false
 	}
-	response, _, err = dnsQuery(ctx, ip, port, nsHost, dns.TypeA, timeout, 0)
+	response, _, err = dnsQuery(ctx, ip, port, protocol, nsHost, dns.TypeA, timeout, 0)
 	return err == nil && response != nil
 }
 
-func testTXT(ctx context.Context, ip netip.Addr, port int, domain string, timeout time.Duration) bool {
+func firstNSHost(response *dns.Msg) string {
+	if response == nil {
+		return ""
+	}
+	for _, records := range [][]dns.RR{response.Answer, response.Ns} {
+		for _, record := range records {
+			ns, ok := record.(*dns.NS)
+			if ok {
+				return ns.Ns
+			}
+		}
+	}
+	return ""
+}
+
+func testTXT(ctx context.Context, ip netip.Addr, port int, protocol Protocol, domain string, timeout time.Duration) bool {
 	query := randomLabel(8) + "." + getParentDomain(domain)
-	response, _, err := dnsQuery(ctx, ip, port, query, dns.TypeTXT, timeout, 0)
+	response, _, err := dnsQuery(ctx, ip, port, protocol, query, dns.TypeTXT, timeout, 0)
 	return err == nil && response != nil
 }
 
-func testRandomSubdomain(ctx context.Context, ip netip.Addr, port int, domain string, timeout time.Duration) bool {
+func testRandomSubdomain(ctx context.Context, ip netip.Addr, port int, protocol Protocol, domain string, timeout time.Duration) bool {
 	for range 2 {
 		query := randomLabel(8) + "." + randomLabel(8) + "." + strings.TrimSuffix(domain, ".")
-		response, _, err := dnsQuery(ctx, ip, port, query, dns.TypeA, timeout, 0)
+		response, _, err := dnsQuery(ctx, ip, port, protocol, query, dns.TypeA, timeout, 0)
 		if err == nil && response != nil {
 			return true
 		}
@@ -404,7 +466,7 @@ func testRandomSubdomain(ctx context.Context, ip netip.Addr, port int, domain st
 	return false
 }
 
-func testTunnelRealism(ctx context.Context, ip netip.Addr, port int, domain string, timeout time.Duration, querySize int) bool {
+func testTunnelRealism(ctx context.Context, ip netip.Addr, port int, protocol Protocol, domain string, timeout time.Duration, querySize int) bool {
 	randomBytes := make([]byte, tunnelRealismPayload(querySize, domain))
 	for index := range randomBytes {
 		randomBytes[index] = byte(rand.IntN(256))
@@ -412,16 +474,16 @@ func testTunnelRealism(ctx context.Context, ip netip.Addr, port int, domain stri
 	encoded := verifyBase32.EncodeToString(randomBytes)
 	labels := splitLabels(encoded, 57)
 	query := strings.Join(labels, ".") + "." + strings.TrimSuffix(domain, ".")
-	response, _, err := dnsQuery(ctx, ip, port, query, dns.TypeTXT, timeout, 0)
+	response, _, err := dnsQuery(ctx, ip, port, protocol, query, dns.TypeTXT, timeout, 0)
 	return err == nil && response != nil
 }
 
-func testEDNS0(ctx context.Context, ip netip.Addr, port int, domain string, timeout time.Duration) (bool, int) {
+func testEDNS0(ctx context.Context, ip netip.Addr, port int, protocol Protocol, domain string, timeout time.Duration) (bool, int) {
 	maxPayload := 0
 	anyOK := false
 	for _, payload := range []int{512, 900, 1232} {
 		query := randomLabel(8) + "." + getParentDomain(domain)
-		response, _, err := dnsQuery(ctx, ip, port, query, dns.TypeA, timeout, payload)
+		response, _, err := dnsQuery(ctx, ip, port, protocol, query, dns.TypeA, timeout, payload)
 		if err != nil || response == nil {
 			break
 		}
@@ -438,10 +500,10 @@ func testEDNS0(ctx context.Context, ip netip.Addr, port int, domain string, time
 	return anyOK, maxPayload
 }
 
-func testNXDOMAIN(ctx context.Context, ip netip.Addr, port int, timeout time.Duration) bool {
+func testNXDOMAIN(ctx context.Context, ip netip.Addr, port int, protocol Protocol, timeout time.Duration) bool {
 	good := 0
 	for range 3 {
-		response, _, err := dnsQuery(ctx, ip, port, randomLabel(12)+".invalid", dns.TypeA, timeout, 0)
+		response, _, err := dnsQuery(ctx, ip, port, protocol, randomLabel(12)+".invalid", dns.TypeA, timeout, 0)
 		if err != nil || response == nil {
 			continue
 		}
@@ -452,12 +514,16 @@ func testNXDOMAIN(ctx context.Context, ip netip.Addr, port int, timeout time.Dur
 	return good >= 2
 }
 
-func dnsQuery(ctx context.Context, ip netip.Addr, port int, name string, qtype uint16, timeout time.Duration, ednsPayload int) (*dns.Msg, int64, error) {
+func dnsQuery(ctx context.Context, ip netip.Addr, port int, protocol Protocol, name string, qtype uint16, timeout time.Duration, ednsPayload int) (*dns.Msg, int64, error) {
 	message := new(dns.Msg)
 	message.SetQuestion(dns.Fqdn(name), qtype)
 	message.RecursionDesired = true
 	if ednsPayload > 0 {
 		message.SetEdns0(uint16(ednsPayload), false)
+	}
+	network, err := dnsNetwork(protocol)
+	if err != nil {
+		return nil, 0, err
 	}
 
 	queryCtx, cancel := context.WithTimeout(ctx, timeout)
@@ -465,7 +531,7 @@ func dnsQuery(ctx context.Context, ip netip.Addr, port int, name string, qtype u
 
 	start := time.Now()
 	response, _, err := (&dns.Client{
-		Net:     "udp",
+		Net:     network,
 		Timeout: timeout,
 	}).ExchangeContext(queryCtx, message, net.JoinHostPort(ip.String(), strconv.Itoa(port)))
 	latency := max(time.Since(start).Milliseconds(), int64(1))
@@ -473,6 +539,21 @@ func dnsQuery(ctx context.Context, ip netip.Addr, port int, name string, qtype u
 		return nil, latency, err
 	}
 	return response, latency, nil
+}
+
+func dnsNetwork(protocol Protocol) (string, error) {
+	switch protocol {
+	case ProtocolUDP:
+		return "udp", nil
+	case ProtocolTCP:
+		return "tcp", nil
+	default:
+		return "", fmt.Errorf("unsupported protocol %q", protocol)
+	}
+}
+
+func protocolUsesUDP(protocol Protocol) bool {
+	return protocol == ProtocolUDP || protocol == ProtocolBoth
 }
 
 func ParseProtocol(value string) (Protocol, error) {

@@ -42,18 +42,22 @@ func (c scanStageConfig) MarshalJSON() ([]byte, error) {
 		Workers   configValue `json:"workers"`
 		TimeoutMS configValue `json:"timeoutMS"`
 		Port      configValue `json:"port"`
+		Protocol  configValue `json:"protocol"`
 	}
 
 	return json.Marshal(savedScanStageConfig{
 		Workers:   c.Workers,
 		TimeoutMS: c.TimeoutMS,
 		Port:      c.Port,
+		Protocol:  c.Protocol,
 	})
 }
 
 type dnsttStageConfig struct {
 	Domain         configValue `json:"domain"`
 	Pubkey         configValue `json:"pubkey"`
+	Transport      configValue `json:"transport"`
+	ResolverURL    configValue `json:"resolverURL"`
 	TimeoutMS      configValue `json:"timeoutMS"`
 	E2ETimeoutS    configValue `json:"e2eTimeoutS"`
 	QuerySize      configValue `json:"querySize"`
@@ -69,6 +73,8 @@ func (c dnsttStageConfig) MarshalJSON() ([]byte, error) {
 	type savedDNSTTStageConfig struct {
 		Domain         configValue `json:"domain"`
 		Pubkey         configValue `json:"pubkey"`
+		Transport      configValue `json:"transport"`
+		ResolverURL    configValue `json:"resolverURL"`
 		TimeoutMS      configValue `json:"timeoutMS"`
 		E2ETimeoutS    configValue `json:"e2eTimeoutS"`
 		QuerySize      configValue `json:"querySize"`
@@ -82,6 +88,8 @@ func (c dnsttStageConfig) MarshalJSON() ([]byte, error) {
 	return json.Marshal(savedDNSTTStageConfig{
 		Domain:         c.Domain,
 		Pubkey:         c.Pubkey,
+		Transport:      c.Transport,
+		ResolverURL:    c.ResolverURL,
 		TimeoutMS:      c.TimeoutMS,
 		E2ETimeoutS:    c.E2ETimeoutS,
 		QuerySize:      c.QuerySize,
@@ -194,10 +202,13 @@ func (u *ui) currentAppConfig() appConfig {
 			Workers:   configValue{Value: u.scanWorkers, Set: true},
 			TimeoutMS: configValue{Value: u.scanTimeoutMS, Set: true},
 			Port:      configValue{Value: u.scanPort, Set: true},
+			Protocol:  configValue{Value: mustProtocol(u.scanProtocol, "UDP"), Set: true},
 		},
 		DNSTTConfig: dnsttStageConfig{
 			Domain:         configValue{Value: u.dnsttDomain, Set: true},
 			Pubkey:         configValue{Value: u.dnsttPubkey, Set: true},
+			Transport:      configValue{Value: u.dnsttTransport, Set: true},
+			ResolverURL:    configValue{Value: u.dnsttResolverURL, Set: true},
 			TimeoutMS:      configValue{Value: u.dnsttTimeoutMS, Set: true},
 			E2ETimeoutS:    configValue{Value: u.dnsttE2ETimeoutS, Set: true},
 			QuerySize:      configValue{Value: u.dnsttQuerySize, Set: true},
@@ -266,7 +277,7 @@ func (u *ui) applyAppConfig(cfg appConfig, configDir string) {
 		u.scanPort = cfg.ScanConfig.Port.Value
 	}
 	if cfg.ScanConfig.Protocol.Set {
-		u.scanProtocol = cfg.ScanConfig.Protocol.Value
+		u.scanProtocol = mustProtocol(cfg.ScanConfig.Protocol.Value, "UDP")
 	}
 	if cfg.ScanConfig.RecursionHost.Set {
 		u.scanRecursionURL = cfg.ScanConfig.RecursionHost.Value
@@ -283,6 +294,12 @@ func (u *ui) applyAppConfig(cfg appConfig, configDir string) {
 	}
 	if cfg.DNSTTConfig.Pubkey.Set {
 		u.dnsttPubkey = cfg.DNSTTConfig.Pubkey.Value
+	}
+	if cfg.DNSTTConfig.Transport.Set {
+		u.dnsttTransport = cfg.DNSTTConfig.Transport.Value
+	}
+	if cfg.DNSTTConfig.ResolverURL.Set {
+		u.dnsttResolverURL = cfg.DNSTTConfig.ResolverURL.Value
 	}
 	if cfg.DNSTTConfig.TimeoutMS.Set {
 		u.dnsttTimeoutMS = cfg.DNSTTConfig.TimeoutMS.Value

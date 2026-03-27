@@ -55,13 +55,34 @@ make build-windows
 
 That writes `dist/range-scout-windows-amd64.exe`.
 
+To build the full default cross-platform matrix:
+
+```bash
+make build-all
+```
+
+That writes separate artifacts to `dist/` for:
+
+- `darwin/amd64`
+- `darwin/arm64`
+- `linux/amd64`
+- `linux/arm64`
+- `windows/amd64`
+- `windows/arm64`
+
+You can override the matrix if needed:
+
+```bash
+make build-all BUILD_OSES="linux windows" BUILD_ARCHES="amd64"
+```
+
 ## Release Builds
 
 The git tag is the release source of truth. This matches a normal GitFlow
 process:
 
-- tag `v0.6.1` for a final release
-- tag `v0.6.1-rcN` for a release candidate
+- tag `v0.7.0` for a final release
+- tag `v0.7.0-rcN` for a release candidate
 
 To build a release artifact from the current tag:
 
@@ -75,9 +96,15 @@ To build a Windows release artifact from the current tag:
 make release-windows
 ```
 
+To build release artifacts for the full default matrix from the current tag:
+
+```bash
+make release-all
+```
+
 Release builds are intentionally strict:
 
-- `HEAD` must be exactly on a tag such as `v0.6.1` or `v0.6.1-rcN`
+- `HEAD` must be exactly on a tag such as `v0.7.0` or `v0.7.0-rcN`
 - the git worktree must be clean
 
 If those checks pass, the artifact filename will match the release tag exactly.
@@ -136,13 +163,13 @@ Notes:
 - `importFilePaths` may be a single string or an object map.
 - The app writes UI field values back as strings when you use `Save Config`.
 - `socksUsername` and `socksPassword` are optional. A SOCKS password without a username is invalid for DNSTT E2E.
-- `Save Config` currently writes `workers`, `timeoutMS`, and `port` in `scanConfig`, plus `domain`, `pubkey`, `timeoutMS`, `e2eTimeoutS`, `querySize`, `scoreThreshold`, `e2eURL`, `testNearbyIPs`, `socksUsername`, and `socksPassword` in `dnsttConfig`.
-- `protocol`, `recursionHost`, `probeHost1`, `probeHost2`, and `e2ePort` are treated as legacy compatibility keys. Older configs can still be loaded with them, but current saves no longer write them back out.
+- `Save Config` currently writes `workers`, `timeoutMS`, `port`, and `protocol` in `scanConfig`, plus `domain`, `pubkey`, `timeoutMS`, `e2eTimeoutS`, `querySize`, `scoreThreshold`, `e2eURL`, `testNearbyIPs`, `socksUsername`, and `socksPassword` in `dnsttConfig`.
+- `recursionHost`, `probeHost1`, `probeHost2`, and `e2ePort` are treated as legacy compatibility keys. Older configs can still be loaded with them, but current saves no longer write them back out.
 - Use `"default"` to provide a fallback import path for any operator.
 - Relative import paths are resolved relative to the `config.json` directory.
 - `Save Config` keeps import paths relative to the config file when possible, so shared configs stay portable.
 - The config file sets startup defaults; it does not auto-run imports, scans, or DNSTT.
-- Ask bug reporters to include the version shown in the header, for example `v0.6.1`.
+- Ask bug reporters to include the version shown in the header, for example `v0.7.0`.
 
 ## Quick Guide
 
@@ -151,7 +178,7 @@ Notes:
 3. Click `Load Targets` to load operator prefixes, set `Import File` and click `Import TXT`, or click `Paste Targets` and paste directly into the modal.
 4. Click `Scan Setup`.
 5. Click `Pick Targets`, use the filter box if needed, and choose one or more CIDRs or single IPs. New target sets start with all targets selected, and the picker has `Select All` / `Deselect All` actions.
-6. Set `Workers`, `Timeout`, `Port`, `DNSTT Domain`, `Query Size`, and `Score Threshold`. The current scan UI uses UDP probes.
+6. Set `Workers`, `Timeout`, `Port`, `Protocol`, `DNSTT Domain`, `Query Size`, and `Score Threshold`. `Protocol` can be `UDP`, `TCP`, or `BOTH`.
 7. Click `Start Scan`.
 8. Review the cached scan state in the details pane. If the app detected a transparent DNS proxy during the scan, it will warn you there.
 9. Click `Test DNSTT` after the scan to open the dedicated DNSTT setup screen. The staged flow is `Load Targets -> DNS Scan -> DNSTT E2E`.
@@ -175,7 +202,7 @@ How it works:
 
 1. The app loads public IPv4 ranges for the selected operator, imports IPv4 CIDRs / single IPv4s from a local `.txt` file, or accepts pasted IPv4 CIDRs / single IPv4s.
 2. You choose one or more CIDR ranges or imported / pasted single IPs that you want to scan.
-3. The scanner probes each host in those ranges over UDP on the port you choose.
+3. The scanner probes each host in those ranges over the selected DNS transport on the port you choose.
 4. If a host answers DNS, the app records it and runs the six SlipNet-style compatibility probes that feed the tunnel score.
 5. The app treats resolvers at or above the current score threshold as DNSTT candidates.
 6. If you want, the app can then test only those qualified resolvers against your DNSTT domain.
@@ -227,7 +254,7 @@ Important:
 - IPv4 only
 - Operator definitions are compiled into the app
 - Files are saved only on demand
-- The current TUI scanner uses UDP compatibility probes and defaults to port `53`
+- The TUI scanner supports `UDP`, `TCP`, and `BOTH` compatibility probes and defaults to port `53`
 - DNSTT testing is a second-stage check over score-qualified resolvers, not a raw host scan
 - Leave `DNSTT Pubkey` empty if you only want the tunnel precheck
 - `Test Nearby IPs` expands only one extra `/24` pass from successful original IPv4 seeds
@@ -241,7 +268,7 @@ Important:
 
 1. برنامه می‌تواند تارگت‌ها را با `Automatic API Fetch` بگیرد، از `Import TXT` بخواند، یا با `Paste Targets` مستقیم از داخل TUI دریافت کند. اگر اپراتوری انتخاب نشده باشد، فقط `Import TXT` و `Paste Targets` در دسترس هستند.
 2. شما یک یا چند رنج CIDR یا IP تکی را برای اسکن انتخاب می‌کنید.
-3. اسکنر هر هاست را فعلا با `UDP` روی پورتی که مشخص می‌کنید بررسی می‌کند.
+3. اسکنر هر هاست را با پروتکل انتخابی `UDP` یا `TCP` یا `BOTH` روی پورتی که مشخص می‌کنید بررسی می‌کند.
 4. اگر یک هاست به DNS پاسخ بدهد، شش probe به سبک SlipNet روی آن اجرا می‌شود و یک tunnel score از `0` تا `6` می‌گیرد.
 5. فقط resolverهایی که به `Score Threshold` برسند وارد مرحله `DNSTT` می‌شوند.
 6. بعد از اسکن، یک صفحه جداگانه برای `DNSTT` باز می‌شود که در آن می‌توانید tunnel-only یا تست کامل end-to-end اجرا کنید.
@@ -253,7 +280,7 @@ Important:
 2. اگر از فایل یا paste استفاده می‌کنید، در هر خط فقط یک `IPv4 CIDR` یا `IPv4` تکی قرار دهید. خط خالی و `#` نادیده گرفته می‌شود.
 3. با `Pick Targets` فقط تارگت‌هایی را انتخاب کنید که واقعا می‌خواهید اسکن شوند. به صورت پیش‌فرض همه تارگت‌های لودشده انتخاب می‌شوند و داخل پنجره انتخاب هم گزینه `Select All` و `Deselect All` دارید. برنامه به صورت خودکار همه هاست‌های قابل اسکن داخل همان انتخاب را بررسی می‌کند و دیگر فیلد جداگانه‌ای برای host limit ندارد.
 4. اگر نیاز خاصی ندارید، پورت را روی `53` نگه دارید.
-5. در اسکن فعلی برنامه از probeهای `UDP` استفاده می‌شود و فیلد `DNSTT Domain` از همان مرحله روی tunnel score اثر دارد، پس قبل از اسکن آن را درست تنظیم کنید.
+5. در مرحله اسکن می‌توانید `UDP` یا `TCP` یا `BOTH` را انتخاب کنید و فیلد `DNSTT Domain` از همان مرحله روی tunnel score اثر دارد، پس قبل از اسکن آن را درست تنظیم کنید.
 6. فیلد `Query Size` را خالی بگذارید مگر این که بخواهید اندازه payload پرس‌وجوهای DNSTT را کمتر کنید.
 7. با `Score Threshold` مشخص می‌کنید چه resolverهایی برای مرحله `DNSTT` به اندازه کافی خوب محسوب شوند.
 8. اول اسکن را اجرا کنید، بعد `Test DNSTT` را بزنید تا وارد صفحه جداگانه `DNSTT` شوید.

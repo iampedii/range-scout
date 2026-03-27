@@ -24,11 +24,22 @@ const (
 	DefaultE2ETestURL  = "http://www.gstatic.com/generate_204"
 )
 
+type Transport string
+
+const (
+	TransportUDP Transport = "UDP"
+	TransportTCP Transport = "TCP"
+	TransportDoT Transport = "DOT"
+	TransportDoH Transport = "DOH"
+)
+
 type Config struct {
 	Workers        int
 	Timeout        time.Duration
 	E2ETimeout     time.Duration
 	Port           int
+	Transport      Transport
+	ResolverURL    string
 	Domain         string
 	Pubkey         string
 	QuerySize      int
@@ -81,6 +92,7 @@ var newEmbeddedClient = func(dnsAddr, tunnelDomain, publicKey, listenAddr string
 
 var runTunnelCheck = tunnelCheck
 var verifySOCKS5HTTP = verifyHTTPThroughSOCKS5
+var waitForSOCKS5Port = waitForEmbeddedSOCKS5Port
 
 func Test(
 	ctx context.Context,
@@ -170,6 +182,11 @@ func prepareConfig(resolvers []model.Resolver, cfg Config) (Config, []int, error
 	if len(candidates) == 0 {
 		return Config{}, nil, fmt.Errorf("no compatible resolvers are available for DNSTT testing")
 	}
+	transport, err := normalizeTransport(cfg.Transport)
+	if err != nil {
+		return Config{}, nil, err
+	}
+	cfg.Transport = transport
 
 	if strings.TrimSpace(cfg.Pubkey) != "" {
 		if cfg.E2ETimeout <= 0 {
@@ -182,6 +199,9 @@ func prepareConfig(resolvers []model.Resolver, cfg Config) (Config, []int, error
 		}
 		if cfg.SOCKSUsername == "" && cfg.SOCKSPassword != "" {
 			return Config{}, nil, fmt.Errorf("dnstt socks password requires a socks username")
+		}
+		if _, err := buildResolverAddr(cfg, "198.51.100.10", cfg.Port); err != nil {
+			return Config{}, nil, err
 		}
 		request, err := http.NewRequest(http.MethodGet, cfg.E2EURL, nil)
 		if err != nil || request.URL == nil || request.URL.Host == "" {
@@ -216,7 +236,7 @@ func runResolverCheck(ctx context.Context, resolver model.Resolver, cfg Config) 
 		return resolver
 	}
 
-	e2eOK, tunnelMS, e2eMS, e2eErr := dnsttCheck(ctx, resolver.IP, cfg.Port, cfg.Domain, cfg.Pubkey, cfg.E2ETimeout, cfg.QuerySize, cfg.E2EURL, cfg.SOCKSUsername, cfg.SOCKSPassword)
+	e2eOK, tunnelMS, e2eMS, e2eErr := dnsttCheck(ctx, resolver.IP, cfg, cfg.Domain, cfg.Pubkey, cfg.E2ETimeout, cfg.QuerySize, cfg.E2EURL, cfg.SOCKSUsername, cfg.SOCKSPassword)
 	if tunnelMS > 0 {
 		resolver.DNSTTTunnelMillis = tunnelMS
 		resolver.DNSTTTunnelOK = true
@@ -493,14 +513,18 @@ func tunnelCheck(ctx context.Context, resolverIP string, port int, domain string
 	}
 }
 
-func dnsttCheck(ctx context.Context, resolverIP string, resolverPort int, domain, pubkey string, timeout time.Duration, querySize int, e2eURL string, socksUsername string, socksPassword string) (bool, int64, int64, error) {
+func dnsttCheck(ctx context.Context, resolverIP string, cfg Config, domain, pubkey string, timeout time.Duration, querySize int, e2eURL string, socksUsername string, socksPassword string) (bool, int64, int64, error) {
 	checkCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
 	start := time.Now()
 	addr := "127.0.0.1:0"
+	resolverAddr, err := buildResolverAddr(cfg, resolverIP, cfg.Port)
+	if err != nil {
+		return false, 0, 0, err
+	}
 	client, err := newEmbeddedClient(
-		net.JoinHostPort(resolverIP, fmt.Sprintf("%d", resolverPort)),
+		resolverAddr,
 		domain,
 		pubkey,
 		addr,
@@ -532,7 +556,7 @@ func dnsttCheck(ctx context.Context, resolverIP string, resolverPort int, domain
 	}
 	defer client.Stop()
 
-	if err := waitForEmbeddedSOCKS5Port(checkCtx, addr, client); err != nil {
+	if err := waitForSOCKS5Port(checkCtx, addr, client); err != nil {
 		if checkCtx.Err() != nil {
 			return false, 0, roundMillis(time.Since(start)), fmt.Errorf("dnstt e2e timed out")
 		}
@@ -630,6 +654,60 @@ func verifyHTTPThroughSOCKS5(ctx context.Context, addr string, testURL string, u
 	}
 
 	return nil
+}
+
+func normalizeTransport(value Transport) (Transport, error) {
+	switch strings.ToUpper(strings.TrimSpace(string(value))) {
+	case "", string(TransportUDP):
+		return TransportUDP, nil
+	case string(TransportTCP):
+		return TransportTCP, nil
+	case string(TransportDoT):
+		return TransportDoT, nil
+	case string(TransportDoH):
+		return TransportDoH, nil
+	default:
+		return "", fmt.Errorf("dnstt transport must be UDP, TCP, DOT, or DOH")
+	}
+}
+
+func buildResolverAddr(cfg Config, resolverIP string, resolverPort int) (string, error) {
+	transport, err := normalizeTransport(cfg.Transport)
+	if err != nil {
+		return "", err
+	}
+
+	template := strings.TrimSpace(cfg.ResolverURL)
+	if template != "" {
+		replacer := strings.NewReplacer(
+			"{ip}", resolverIP,
+			"{port}", fmt.Sprintf("%d", resolverPort),
+		)
+		value := replacer.Replace(template)
+		if transport == TransportDoH {
+			request, err := http.NewRequest(http.MethodGet, value, nil)
+			if err != nil || request.URL == nil || request.URL.Host == "" {
+				return "", fmt.Errorf("dnstt resolver endpoint must be a valid https url")
+			}
+			if request.URL.Scheme != "https" {
+				return "", fmt.Errorf("dnstt resolver endpoint must use https for DOH transport")
+			}
+		}
+		return value, nil
+	}
+
+	switch transport {
+	case TransportUDP:
+		return net.JoinHostPort(resolverIP, fmt.Sprintf("%d", resolverPort)), nil
+	case TransportTCP:
+		return "tcp://" + net.JoinHostPort(resolverIP, fmt.Sprintf("%d", resolverPort)), nil
+	case TransportDoT:
+		return "tls://" + net.JoinHostPort(resolverIP, fmt.Sprintf("%d", resolverPort)), nil
+	case TransportDoH:
+		return "", fmt.Errorf("dnstt resolver endpoint is required for DOH transport")
+	default:
+		return "", fmt.Errorf("dnstt transport must be UDP, TCP, DOT, or DOH")
+	}
 }
 
 func socks5Auth(username string, password string) *proxy.Auth {

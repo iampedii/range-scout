@@ -2,11 +2,13 @@ package dnsttembed
 
 import (
 	"context"
+	"crypto/tls"
 	"errors"
 	"fmt"
 	"io"
 	"log"
 	"net"
+	"net/http"
 	"strings"
 	"sync"
 	"time"
@@ -47,9 +49,6 @@ type Client struct {
 func NewClient(dnsAddr, tunnelDomain, publicKey, listenAddr string) (*Client, error) {
 	if strings.TrimSpace(dnsAddr) == "" {
 		return nil, fmt.Errorf("resolver address is required")
-	}
-	if strings.Contains(dnsAddr, "://") {
-		return nil, fmt.Errorf("embedded runtime only supports UDP resolver addresses")
 	}
 	if strings.TrimSpace(tunnelDomain) == "" {
 		return nil, fmt.Errorf("tunnel domain is required")
@@ -104,25 +103,22 @@ func (c *Client) Start() error {
 		return fmt.Errorf("invalid tunnel domain: %w", err)
 	}
 
-	remoteAddr, err := net.ResolveUDPAddr("udp", c.dnsAddr)
-	if err != nil {
-		c.shutdown()
-		return fmt.Errorf("resolve resolver address: %w", err)
-	}
-
 	localAddr, err := net.ResolveTCPAddr("tcp", c.listenAddr)
 	if err != nil {
 		c.shutdown()
 		return fmt.Errorf("resolve listen address: %w", err)
 	}
 
-	transportConn, err := net.ListenPacket("udp", ":0")
+	transportConn, remoteAddr, err := openTransport(c.dnsAddr, authoritativeMode)
 	if err != nil {
 		c.shutdown()
-		return fmt.Errorf("open udp transport: %w", err)
+		return fmt.Errorf("open dns transport: %w", err)
 	}
 
-	dnsConn := dnsttclient.NewDNSPacketConn(transportConn, remoteAddr, domain)
+	var dnsConn net.PacketConn = dnsttclient.NewDNSPacketConnWithConfig(transportConn, remoteAddr, domain, dnsPacketConnConfig(authoritativeMode))
+	if _, ok := remoteAddr.(turbotunnel.DummyAddr); ok {
+		dnsConn = &addrNormConn{PacketConn: dnsConn, fixedAddr: remoteAddr}
+	}
 
 	mtu := dnsNameCapacity(domain) - 8 - 1 - dnsttclient.NumPadding - 1
 	if mtu < 80 {
@@ -131,8 +127,8 @@ func (c *Client) Start() error {
 		c.shutdown()
 		return fmt.Errorf("domain %s leaves only %d bytes for payload", domain, mtu)
 	}
-	if maxPayload > 0 && maxPayload < mtu {
-		mtu = maxPayload
+	if cappedPayload := effectiveMaxPayload(maxPayload, mtu); cappedPayload > 0 {
+		mtu = cappedPayload
 	}
 
 	kcpConn, err := kcp.NewConn2(remoteAddr, nil, 0, 0, dnsConn)
@@ -143,8 +139,14 @@ func (c *Client) Start() error {
 		return fmt.Errorf("open kcp connection: %w", err)
 	}
 	kcpConn.SetStreamMode(true)
-	kcpConn.SetNoDelay(0, 0, 0, 1)
-	kcpConn.SetWindowSize(turbotunnel.QueueSize/2, turbotunnel.QueueSize/2)
+	if authoritativeMode {
+		kcpConn.SetNoDelay(1, 20, 2, 1)
+		kcpConn.SetACKNoDelay(true)
+		kcpConn.SetWindowSize(256, 256)
+	} else {
+		kcpConn.SetNoDelay(0, 0, 0, 1)
+		kcpConn.SetWindowSize(64, 64)
+	}
 	if !kcpConn.SetMtu(mtu) {
 		_ = kcpConn.Close()
 		_ = dnsConn.Close()
@@ -165,10 +167,9 @@ func (c *Client) Start() error {
 	smuxConfig := smux.DefaultConfig()
 	smuxConfig.Version = 2
 	smuxConfig.KeepAliveTimeout = idleTimeout
-	smuxConfig.MaxStreamBuffer = 1 * 1024 * 1024
 	if authoritativeMode {
 		// Keep the flag for interface compatibility even though the desktop flow
-		// currently always uses the default tuning.
+		// currently always uses the default tuning unless explicitly requested.
 		smuxConfig.MaxStreamBuffer = 4 * 1024 * 1024
 		smuxConfig.MaxReceiveBuffer = 16 * 1024 * 1024
 	}
@@ -308,6 +309,80 @@ func dnsNameCapacity(domain dnsttdns.Name) int {
 	capacity = capacity * 63 / 64
 	capacity = capacity * 5 / 8
 	return capacity
+}
+
+func openTransport(dnsAddr string, authoritativeMode bool) (net.PacketConn, net.Addr, error) {
+	switch {
+	case strings.HasPrefix(dnsAddr, "https://"):
+		transport := http.DefaultTransport.(*http.Transport).Clone()
+		numSenders := 8
+		var config *dnsttclient.HTTPPacketConnConfig
+		if authoritativeMode {
+			numSenders = 32
+		} else {
+			config = &dnsttclient.HTTPPacketConnConfig{
+				RetryAfterDefault: 2 * time.Second,
+				SleepOnRateLimit:  true,
+			}
+		}
+		packetConn, err := dnsttclient.NewHTTPPacketConnWithConfig(transport, dnsAddr, numSenders, config)
+		if err != nil {
+			return nil, nil, err
+		}
+		return packetConn, turbotunnel.DummyAddr{}, nil
+	case strings.HasPrefix(dnsAddr, "tls://"):
+		packetConn, err := dnsttclient.NewTLSPacketConn(strings.TrimPrefix(dnsAddr, "tls://"), (&tls.Dialer{}).DialContext)
+		if err != nil {
+			return nil, nil, err
+		}
+		return packetConn, turbotunnel.DummyAddr{}, nil
+	case strings.HasPrefix(dnsAddr, "tcp://"):
+		packetConn, err := dnsttclient.NewTLSPacketConn(strings.TrimPrefix(dnsAddr, "tcp://"), func(ctx context.Context, network, addr string) (net.Conn, error) {
+			return (&net.Dialer{}).DialContext(ctx, "tcp", addr)
+		})
+		if err != nil {
+			return nil, nil, err
+		}
+		return packetConn, turbotunnel.DummyAddr{}, nil
+	default:
+		remoteAddr, err := net.ResolveUDPAddr("udp", dnsAddr)
+		if err != nil {
+			return nil, nil, err
+		}
+		packetConn, err := net.ListenPacket("udp", ":0")
+		if err != nil {
+			return nil, nil, err
+		}
+		return packetConn, remoteAddr, nil
+	}
+}
+
+func dnsPacketConnConfig(authoritativeMode bool) *dnsttclient.DNSPacketConnConfig {
+	if authoritativeMode {
+		return &dnsttclient.DNSPacketConnConfig{
+			PollLimit:     16,
+			InitPollDelay: 200 * time.Millisecond,
+			MaxPollDelay:  4 * time.Second,
+		}
+	}
+	return &dnsttclient.DNSPacketConnConfig{PollLimit: 8}
+}
+
+func effectiveMaxPayload(requested int, mtu int) int {
+	if requested >= 50 && requested < mtu {
+		return requested
+	}
+	return 0
+}
+
+type addrNormConn struct {
+	net.PacketConn
+	fixedAddr net.Addr
+}
+
+func (a *addrNormConn) ReadFrom(p []byte) (int, net.Addr, error) {
+	n, _, err := a.PacketConn.ReadFrom(p)
+	return n, a.fixedAddr, err
 }
 
 func proxyTCPConn(local *net.TCPConn, session *smux.Session, conv uint32) error {

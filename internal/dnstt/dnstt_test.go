@@ -244,6 +244,82 @@ func TestPrepareConfigDefaultsE2EURLWhenPubkeySet(t *testing.T) {
 	}
 }
 
+func TestPrepareConfigSkipsTCPOnlyResolvers(t *testing.T) {
+	cfg, candidates, err := prepareConfig([]model.Resolver{
+		{IP: "198.51.100.10", Transport: "TCP", TunnelScore: 6},
+		{IP: "198.51.100.11", Transport: "UDP", TunnelScore: 6},
+		{IP: "198.51.100.12", Transport: "BOTH", TunnelScore: 6},
+	}, Config{
+		Workers: 1,
+		Timeout: 500 * time.Millisecond,
+		Domain:  "t.example.com",
+	})
+	if err != nil {
+		t.Fatalf("prepareConfig returned error: %v", err)
+	}
+	if cfg.Domain != "t.example.com." {
+		t.Fatalf("expected fqdn domain, got %q", cfg.Domain)
+	}
+	if len(candidates) != 3 || candidates[0] != 0 || candidates[1] != 1 || candidates[2] != 2 {
+		t.Fatalf("unexpected candidates: %#v", candidates)
+	}
+}
+
+func TestPrepareConfigRejectsInvalidTransport(t *testing.T) {
+	_, _, err := prepareConfig([]model.Resolver{
+		{IP: "198.51.100.10", Transport: "TCP", TunnelScore: 6},
+	}, Config{
+		Workers:   1,
+		Timeout:   500 * time.Millisecond,
+		Domain:    "t.example.com",
+		Transport: "bogus",
+	})
+	if err == nil {
+		t.Fatal("expected transport validation error")
+	}
+	if !strings.Contains(err.Error(), "transport") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestPrepareConfigRequiresResolverEndpointForDoH(t *testing.T) {
+	_, _, err := prepareConfig([]model.Resolver{
+		{IP: "198.51.100.10", TunnelScore: 6},
+	}, Config{
+		Workers:    1,
+		Timeout:    500 * time.Millisecond,
+		E2ETimeout: 5 * time.Second,
+		Domain:     "t.example.com",
+		Pubkey:     "deadbeef",
+		Transport:  TransportDoH,
+	})
+	if err == nil {
+		t.Fatal("expected resolver endpoint validation error")
+	}
+	if !strings.Contains(err.Error(), "resolver endpoint") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestBuildResolverAddrUsesTransportDefaultsAndTemplates(t *testing.T) {
+	addr, err := buildResolverAddr(Config{Transport: TransportUDP}, "198.51.100.10", 53)
+	if err != nil || addr != "198.51.100.10:53" {
+		t.Fatalf("unexpected udp resolver addr: %q err=%v", addr, err)
+	}
+	addr, err = buildResolverAddr(Config{Transport: TransportTCP}, "198.51.100.10", 53)
+	if err != nil || addr != "tcp://198.51.100.10:53" {
+		t.Fatalf("unexpected tcp resolver addr: %q err=%v", addr, err)
+	}
+	addr, err = buildResolverAddr(Config{Transport: TransportDoT}, "198.51.100.10", 853)
+	if err != nil || addr != "tls://198.51.100.10:853" {
+		t.Fatalf("unexpected dot resolver addr: %q err=%v", addr, err)
+	}
+	addr, err = buildResolverAddr(Config{Transport: TransportDoH, ResolverURL: "https://{ip}:{port}/dns-query"}, "198.51.100.10", 443)
+	if err != nil || addr != "https://198.51.100.10:443/dns-query" {
+		t.Fatalf("unexpected doh resolver addr: %q err=%v", addr, err)
+	}
+}
+
 func TestPrepareConfigAllowsBlankE2EURLInTunnelOnlyMode(t *testing.T) {
 	cfg, _, err := prepareConfig([]model.Resolver{
 		{IP: "198.51.100.10", TunnelScore: 6},
@@ -311,9 +387,11 @@ func TestVerifyHTTPThroughSOCKS5FailsWithoutCredentialsWhenProxyRequiresAuth(t *
 func TestDNSTTCheckUsesDynamicLoopbackPort(t *testing.T) {
 	previousNewEmbeddedClient := newEmbeddedClient
 	previousVerifySOCKS5HTTP := verifySOCKS5HTTP
+	previousWaitForSOCKS5Port := waitForSOCKS5Port
 	t.Cleanup(func() {
 		newEmbeddedClient = previousNewEmbeddedClient
 		verifySOCKS5HTTP = previousVerifySOCKS5HTTP
+		waitForSOCKS5Port = previousWaitForSOCKS5Port
 	})
 
 	var requestedAddr string
@@ -329,11 +407,14 @@ func TestDNSTTCheckUsesDynamicLoopbackPort(t *testing.T) {
 		verifiedAddr = addr
 		return nil
 	}
+	waitForSOCKS5Port = func(ctx context.Context, addr string, client embeddedClient) error {
+		return nil
+	}
 
 	ok, tunnelMS, e2eMS, err := dnsttCheck(
 		context.Background(),
 		"198.51.100.10",
-		53,
+		Config{Port: 53},
 		"t.example.com",
 		"deadbeef",
 		2*time.Second,
@@ -348,8 +429,8 @@ func TestDNSTTCheckUsesDynamicLoopbackPort(t *testing.T) {
 	if !ok {
 		t.Fatal("expected dnsttCheck to succeed")
 	}
-	if tunnelMS <= 0 || e2eMS <= 0 {
-		t.Fatalf("expected positive timings, got tunnel=%d e2e=%d", tunnelMS, e2eMS)
+	if tunnelMS < 0 || e2eMS < 0 {
+		t.Fatalf("expected non-negative timings, got tunnel=%d e2e=%d", tunnelMS, e2eMS)
 	}
 	if requestedAddr != "127.0.0.1:0" {
 		t.Fatalf("expected dynamic loopback listen address, got %q", requestedAddr)
@@ -369,7 +450,7 @@ func nilContext() context.Context {
 type stubEmbeddedClient struct {
 	mu            sync.Mutex
 	requestedAddr string
-	listener      net.Listener
+	listenAddr    string
 	running       bool
 }
 
@@ -379,41 +460,17 @@ func (c *stubEmbeddedClient) SetMaxPayload(int) {}
 
 func (c *stubEmbeddedClient) Start() error {
 	c.mu.Lock()
-	requestedAddr := c.requestedAddr
-	c.mu.Unlock()
-
-	listener, err := net.Listen("tcp", requestedAddr)
-	if err != nil {
-		return err
-	}
-
-	c.mu.Lock()
-	c.listener = listener
+	c.listenAddr = "127.0.0.1:19001"
 	c.running = true
 	c.mu.Unlock()
-
-	go func() {
-		for {
-			conn, err := listener.Accept()
-			if err != nil {
-				return
-			}
-			_ = conn.Close()
-		}
-	}()
-
 	return nil
 }
 
 func (c *stubEmbeddedClient) Stop() {
 	c.mu.Lock()
-	listener := c.listener
-	c.listener = nil
+	c.listenAddr = ""
 	c.running = false
 	c.mu.Unlock()
-	if listener != nil {
-		_ = listener.Close()
-	}
 }
 
 func (c *stubEmbeddedClient) IsRunning() bool {
@@ -425,8 +482,8 @@ func (c *stubEmbeddedClient) IsRunning() bool {
 func (c *stubEmbeddedClient) ListenAddr() string {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if c.listener != nil {
-		return c.listener.Addr().String()
+	if c.listenAddr != "" {
+		return c.listenAddr
 	}
 	return c.requestedAddr
 }

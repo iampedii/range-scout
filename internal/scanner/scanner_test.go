@@ -5,6 +5,7 @@ import (
 	"errors"
 	"net"
 	"net/netip"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -23,7 +24,7 @@ func TestProbeResolverScoresFullyCompatibleResolvers(t *testing.T) {
 	resolver, ok := probeResolver(context.Background(), scanTarget{
 		IP:     netip.MustParseAddr("127.0.0.1"),
 		Prefix: "127.0.0.1/32",
-	}, 500*time.Millisecond, port, domain, 0, 2)
+	}, 500*time.Millisecond, port, ProtocolUDP, domain, 0, 2)
 	if !ok {
 		t.Fatal("expected resolver to be reachable")
 	}
@@ -85,6 +86,120 @@ func TestScanTracksWorkingCompatibleAndQualifiedCounts(t *testing.T) {
 	}
 	if len(result.Resolvers) != 1 || result.Resolvers[0].TunnelScore != 6 {
 		t.Fatalf("unexpected scan results: %#v", result.Resolvers)
+	}
+}
+
+func TestProbeResolverSupportsTCP(t *testing.T) {
+	const domain = "tun.example.com."
+
+	port, shutdown := startTestDNSServer(t, fullyCompatibleHandler(domain), ProtocolTCP)
+	defer shutdown()
+
+	resolver, ok := probeResolver(context.Background(), scanTarget{
+		IP:     netip.MustParseAddr("127.0.0.1"),
+		Prefix: "127.0.0.1/32",
+	}, 500*time.Millisecond, port, ProtocolTCP, domain, 0, 2)
+	if !ok {
+		t.Fatal("expected tcp resolver to be reachable")
+	}
+	if resolver.Transport != string(ProtocolTCP) {
+		t.Fatalf("expected transport %q, got %q", ProtocolTCP, resolver.Transport)
+	}
+	if resolver.TunnelScore != 6 {
+		t.Fatalf("expected tunnel score 6, got %d", resolver.TunnelScore)
+	}
+}
+
+func TestProbeResolverAcceptsNSFromAuthoritySection(t *testing.T) {
+	const domain = "tun.example.com."
+
+	port, shutdown := startTestDNSServer(t, authorityNSHandler(domain))
+	defer shutdown()
+
+	resolver, ok := probeResolver(context.Background(), scanTarget{
+		IP:     netip.MustParseAddr("127.0.0.1"),
+		Prefix: "127.0.0.1/32",
+	}, 500*time.Millisecond, port, ProtocolUDP, domain, 0, 2)
+	if !ok {
+		t.Fatal("expected resolver to be reachable")
+	}
+	if !resolver.TunnelNSSupport {
+		t.Fatalf("expected authority-section NS delegation to count as supported: %#v", resolver)
+	}
+}
+
+func TestProbeResolverMarksBothWhenUDPAndTCPPass(t *testing.T) {
+	const domain = "tun.example.com."
+
+	port, shutdown := startTestDNSServer(t, fullyCompatibleHandler(domain), ProtocolUDP, ProtocolTCP)
+	defer shutdown()
+
+	resolver, ok := probeResolver(context.Background(), scanTarget{
+		IP:     netip.MustParseAddr("127.0.0.1"),
+		Prefix: "127.0.0.1/32",
+	}, 500*time.Millisecond, port, ProtocolBoth, domain, 0, 2)
+	if !ok {
+		t.Fatal("expected dual-protocol resolver to be reachable")
+	}
+	if resolver.Transport != string(ProtocolBoth) {
+		t.Fatalf("expected transport %q, got %q", ProtocolBoth, resolver.Transport)
+	}
+	if resolver.TunnelScore != 6 {
+		t.Fatalf("expected tunnel score 6, got %d", resolver.TunnelScore)
+	}
+}
+
+func TestCombineProtocolResolversKeepsBestRealTransportResult(t *testing.T) {
+	udp := model.Resolver{
+		Transport:           string(ProtocolUDP),
+		IP:                  "198.51.100.10",
+		Prefix:              "198.51.100.10/32",
+		DNSReachable:        true,
+		RecursionAdvertised: false,
+		LatencyMillis:       50,
+		TunnelNSSupport:     true,
+		TunnelTXTSupport:    true,
+		TunnelRandomSub:     true,
+		TunnelRealism:       true,
+		TunnelScore:         4,
+		RecursionAvailable:  true,
+	}
+	tcp := model.Resolver{
+		Transport:            string(ProtocolTCP),
+		IP:                   "198.51.100.10",
+		Prefix:               "198.51.100.10/32",
+		DNSReachable:         true,
+		RecursionAdvertised:  true,
+		LatencyMillis:        10,
+		TunnelEDNS0Support:   true,
+		TunnelEDNSMaxPayload: 1232,
+		TunnelNXDOMAIN:       true,
+		TunnelScore:          2,
+		RecursionAvailable:   true,
+	}
+
+	combined := combineProtocolResolvers(udp, tcp)
+
+	if combined.Transport != string(ProtocolBoth) {
+		t.Fatalf("expected transport %q, got %q", ProtocolBoth, combined.Transport)
+	}
+	if combined.TunnelScore != udp.TunnelScore {
+		t.Fatalf("expected combined score %d, got %d", udp.TunnelScore, combined.TunnelScore)
+	}
+	if !combined.TunnelNSSupport || !combined.TunnelTXTSupport || !combined.TunnelRandomSub || !combined.TunnelRealism {
+		t.Fatalf("expected combined resolver to preserve best transport flags: %#v", combined)
+	}
+	if combined.TunnelEDNS0Support || combined.TunnelNXDOMAIN {
+		t.Fatalf("expected combined resolver not to merge incompatible flags across protocols: %#v", combined)
+	}
+	if combined.Stable {
+		t.Fatalf("expected combined resolver not to become stable from split protocol results: %#v", combined)
+	}
+	if combined.LatencyMillis != udp.LatencyMillis {
+		t.Fatalf("expected combined latency %dms, got %d", udp.LatencyMillis, combined.LatencyMillis)
+	}
+	if combined.RecursionAdvertised != udp.RecursionAdvertised {
+		t.Fatalf("expected combined recursion advertised %t, got %t", udp.RecursionAdvertised, combined.RecursionAdvertised)
 	}
 }
 
@@ -208,34 +323,118 @@ func fullyCompatibleHandler(domain string) dns.HandlerFunc {
 	}
 }
 
-func startTestDNSServer(t *testing.T, handler dns.HandlerFunc) (int, func()) {
+func authorityNSHandler(domain string) dns.HandlerFunc {
+	base := fullyCompatibleHandler(domain)
+	parent := getParentDomain(domain) + "."
+	nsHost := "ns." + parent
+
+	return func(w dns.ResponseWriter, r *dns.Msg) {
+		if r.Question[0].Qtype != dns.TypeNS || r.Question[0].Name != parent {
+			base(w, r)
+			return
+		}
+
+		reply := new(dns.Msg)
+		reply.SetReply(r)
+		reply.Ns = []dns.RR{
+			&dns.NS{Hdr: dns.RR_Header{Name: parent, Rrtype: dns.TypeNS, Class: dns.ClassINET, Ttl: 300}, Ns: nsHost},
+		}
+		reply.RecursionAvailable = true
+		_ = w.WriteMsg(reply)
+	}
+}
+
+func startTestDNSServer(t *testing.T, handler dns.HandlerFunc, protocols ...Protocol) (int, func()) {
 	t.Helper()
 
-	conn, err := net.ListenPacket("udp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("ListenPacket returned error: %v", err)
+	if len(protocols) == 0 {
+		protocols = []Protocol{ProtocolUDP}
 	}
 
-	server := &dns.Server{
-		PacketConn: conn,
-		Handler:    handler,
+	enableUDP := false
+	enableTCP := false
+	for _, protocol := range protocols {
+		switch protocol {
+		case ProtocolUDP:
+			enableUDP = true
+		case ProtocolTCP:
+			enableTCP = true
+		default:
+			t.Fatalf("unsupported test protocol %q", protocol)
+		}
 	}
 
-	errCh := make(chan error, 1)
-	go func() {
-		errCh <- server.ActivateAndServe()
-	}()
+	var (
+		packetConn net.PacketConn
+		listener   net.Listener
+		port       int
+	)
 
-	port := conn.LocalAddr().(*net.UDPAddr).Port
+	if enableTCP {
+		var err error
+		listener, err = net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			t.Fatalf("Listen returned error: %v", err)
+		}
+		port = listener.Addr().(*net.TCPAddr).Port
+	}
+	if enableUDP {
+		addr := "127.0.0.1:0"
+		if port > 0 {
+			addr = net.JoinHostPort("127.0.0.1", strconv.Itoa(port))
+		}
+		var err error
+		packetConn, err = net.ListenPacket("udp", addr)
+		if err != nil {
+			t.Fatalf("ListenPacket returned error: %v", err)
+		}
+		if port == 0 {
+			port = packetConn.LocalAddr().(*net.UDPAddr).Port
+		}
+	}
+
+	type runningServer struct {
+		server *dns.Server
+		errCh  chan error
+	}
+	servers := make([]runningServer, 0, 2)
+
+	if packetConn != nil {
+		server := &dns.Server{
+			PacketConn: packetConn,
+			Handler:    handler,
+		}
+		errCh := make(chan error, 1)
+		go func() {
+			errCh <- server.ActivateAndServe()
+		}()
+		servers = append(servers, runningServer{server: server, errCh: errCh})
+	}
+	if listener != nil {
+		server := &dns.Server{
+			Listener: listener,
+			Handler:  handler,
+		}
+		errCh := make(chan error, 1)
+		go func() {
+			errCh <- server.ActivateAndServe()
+		}()
+		servers = append(servers, runningServer{server: server, errCh: errCh})
+	}
+
 	shutdown := func() {
-		_ = server.Shutdown()
-		select {
-		case err := <-errCh:
-			if err != nil && !errors.Is(err, net.ErrClosed) && !strings.Contains(err.Error(), "closed network connection") {
-				t.Fatalf("dns server returned error: %v", err)
+		for _, server := range servers {
+			_ = server.server.Shutdown()
+		}
+		for _, server := range servers {
+			select {
+			case err := <-server.errCh:
+				if err != nil && !errors.Is(err, net.ErrClosed) && !strings.Contains(err.Error(), "closed network connection") {
+					t.Fatalf("dns server returned error: %v", err)
+				}
+			case <-time.After(500 * time.Millisecond):
+				t.Fatal("timed out waiting for dns server shutdown")
 			}
-		case <-time.After(500 * time.Millisecond):
-			t.Fatal("timed out waiting for dns server shutdown")
 		}
 	}
 

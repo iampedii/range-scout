@@ -266,6 +266,7 @@ func TestRenderDetailsShowsSelectedTargetPreview(t *testing.T) {
 func TestScanConfigNormalizesProbeURLs(t *testing.T) {
 	u := newUI()
 	u.scanPort = "5353"
+	u.scanProtocol = string(scanner.ProtocolBoth)
 	u.dnsttDomain = "dns.google"
 	u.dnsttQuerySize = "1400"
 	u.dnsttScoreThreshold = "3"
@@ -284,7 +285,7 @@ func TestScanConfigNormalizesProbeURLs(t *testing.T) {
 	if cfg.Port != 5353 {
 		t.Fatalf("unexpected scan port: %d", cfg.Port)
 	}
-	if cfg.Protocol != scanner.ProtocolUDP {
+	if cfg.Protocol != scanner.ProtocolBoth {
 		t.Fatalf("unexpected scan protocol: %s", cfg.Protocol)
 	}
 	if cfg.QuerySize != 1400 {
@@ -327,6 +328,12 @@ func TestNewUIDefaultsScannerPortAndProtocol(t *testing.T) {
 	}
 	if u.dnsttE2EURL != dnstt.DefaultE2ETestURL {
 		t.Fatalf("unexpected default DNSTT e2e url: %q", u.dnsttE2EURL)
+	}
+	if u.dnsttTransport != string(dnstt.TransportUDP) {
+		t.Fatalf("unexpected default DNSTT transport: %q", u.dnsttTransport)
+	}
+	if u.dnsttResolverURL != "" {
+		t.Fatalf("expected blank default DNSTT resolver url, got %q", u.dnsttResolverURL)
 	}
 	if u.dnsttSOCKSUsername != "" || u.dnsttSOCKSPassword != "" {
 		t.Fatalf("expected blank default DNSTT socks auth, got username=%q password=%q", u.dnsttSOCKSUsername, u.dnsttSOCKSPassword)
@@ -444,6 +451,31 @@ func TestDNSTTConfigUsesConfiguredE2EURL(t *testing.T) {
 	if !cfg.TestNearbyIPs {
 		t.Fatal("expected nearby IP testing to be enabled")
 	}
+	if cfg.Transport != dnstt.TransportUDP {
+		t.Fatalf("unexpected default dnstt transport: %q", cfg.Transport)
+	}
+	if cfg.ResolverURL != "" {
+		t.Fatalf("expected empty default resolver url, got %q", cfg.ResolverURL)
+	}
+}
+
+func TestDNSTTConfigSupportsDoHResolverTemplate(t *testing.T) {
+	u := newUI()
+	u.dnsttDomain = "d.example.com"
+	u.dnsttPubkey = "deadbeef"
+	u.dnsttTransport = string(dnstt.TransportDoH)
+	u.dnsttResolverURL = "https://{ip}:{port}/dns-query"
+
+	cfg, err := u.dnsttConfig(443)
+	if err != nil {
+		t.Fatalf("dnsttConfig returned error: %v", err)
+	}
+	if cfg.Transport != dnstt.TransportDoH {
+		t.Fatalf("unexpected transport: %q", cfg.Transport)
+	}
+	if cfg.ResolverURL != "https://{ip}:{port}/dns-query" {
+		t.Fatalf("unexpected resolver url: %q", cfg.ResolverURL)
+	}
 }
 
 func TestDNSTTConfigRejectsSOCKSPasswordWithoutUsernameWhenE2EEnabled(t *testing.T) {
@@ -510,15 +542,23 @@ func TestDNSTTFormPlacesPubkeyUnderDomainInCompactLayout(t *testing.T) {
 
 	domainIndex := findFormItemIndexByLabel(u, "DNSTT Domain")
 	pubkeyIndex := findFormItemIndexByLabel(u, "DNSTT Pubkey")
+	transportIndex := findFormItemIndexByLabel(u, "DNSTT Transport")
+	resolverEndpointIndex := findFormItemIndexByLabel(u, "Resolver Endpoint")
 	timeoutIndex := findFormItemIndexByLabel(u, "DNSTT Timeout")
-	if domainIndex == -1 || pubkeyIndex == -1 || timeoutIndex == -1 {
-		t.Fatalf("expected domain, pubkey, and timeout fields in compact layout")
+	if domainIndex == -1 || pubkeyIndex == -1 || transportIndex == -1 || resolverEndpointIndex == -1 || timeoutIndex == -1 {
+		t.Fatalf("expected domain, pubkey, transport, resolver endpoint, and timeout fields in compact layout")
 	}
 	if pubkeyIndex != domainIndex+1 {
 		t.Fatalf("expected pubkey directly after domain, got domain=%d pubkey=%d", domainIndex, pubkeyIndex)
 	}
-	if timeoutIndex != pubkeyIndex+1 {
-		t.Fatalf("expected timeout after pubkey, got pubkey=%d timeout=%d", pubkeyIndex, timeoutIndex)
+	if transportIndex != pubkeyIndex+1 {
+		t.Fatalf("expected transport after pubkey, got pubkey=%d transport=%d", pubkeyIndex, transportIndex)
+	}
+	if resolverEndpointIndex != transportIndex+1 {
+		t.Fatalf("expected resolver endpoint after transport, got transport=%d resolverEndpoint=%d", transportIndex, resolverEndpointIndex)
+	}
+	if timeoutIndex != resolverEndpointIndex+1 {
+		t.Fatalf("expected timeout after resolver endpoint, got resolverEndpoint=%d timeout=%d", resolverEndpointIndex, timeoutIndex)
 	}
 }
 

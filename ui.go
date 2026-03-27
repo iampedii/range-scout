@@ -74,7 +74,7 @@ const (
 	formNoteWrapWidth    = 24
 	formSidebarWrapWidth = 20
 	uiSeparatorLine      = "────────────────────────"
-	uiVersionLabel       = "v0.6.1"
+	uiVersionLabel       = "v0.7.0"
 	operatorPlaceholder  = "Paste or Import"
 	customOperatorKey    = "custom"
 	customOperatorName   = "Custom Targets"
@@ -152,6 +152,8 @@ type ui struct {
 	scanProbeURL2       string
 	dnsttDomain         string
 	dnsttPubkey         string
+	dnsttTransport      string
+	dnsttResolverURL    string
 	dnsttTimeoutMS      string
 	dnsttE2ETimeoutS    string
 	dnsttQuerySize      string
@@ -205,6 +207,7 @@ func newUI() *ui {
 		scanProbeURL2:       "example.com",
 		dnsttTimeoutMS:      "15000",
 		dnsttE2ETimeoutS:    "20",
+		dnsttTransport:      string(dnstt.TransportUDP),
 		dnsttQuerySize:      "",
 		dnsttScoreThreshold: "2",
 		dnsttE2EURL:         dnstt.DefaultE2ETestURL,
@@ -953,7 +956,9 @@ func (u *ui) rebuildForm() {
 		u.form.AddFormItem(u.newInput("Workers", u.scanWorkers, func(value string) { u.scanWorkers = value }))
 		u.form.AddFormItem(u.newInput("Timeout", u.scanTimeoutMS, func(value string) { u.scanTimeoutMS = value }))
 		u.form.AddFormItem(u.newInput("Port", u.scanPort, func(value string) { u.scanPort = value }))
-		u.form.AddFormItem(u.newReadOnlyInput("Protocol", string(scanner.ProtocolUDP)))
+		u.form.AddFormItem(u.newScanProtocolDropDown("Protocol", displayScanProtocol(u.scanProtocol), func(value string) {
+			u.scanProtocol = value
+		}))
 		u.form.AddFormItem(u.newInput("DNSTT Domain", u.dnsttDomain, func(value string) { u.dnsttDomain = value }))
 		u.form.AddFormItem(u.newInput("Query Size", u.dnsttQuerySize, func(value string) { u.dnsttQuerySize = value }))
 		u.form.AddFormItem(u.newInput("Score Threshold", u.dnsttScoreThreshold, func(value string) { u.dnsttScoreThreshold = value }))
@@ -998,6 +1003,8 @@ func (u *ui) rebuildForm() {
 		u.form.SetTitle("Commands - DNSTT E2E")
 		u.form.AddFormItem(u.newInput("DNSTT Domain", u.dnsttDomain, func(value string) { u.dnsttDomain = value }))
 		u.form.AddFormItem(u.newInput("DNSTT Pubkey", u.dnsttPubkey, func(value string) { u.dnsttPubkey = value }))
+		u.form.AddFormItem(u.newDNSTTTransportDropDown("DNSTT Transport", displayDNSTTTransport(u.dnsttTransport), func(value string) { u.dnsttTransport = value }))
+		u.form.AddFormItem(u.newInput("Resolver Endpoint", u.dnsttResolverURL, func(value string) { u.dnsttResolverURL = value }))
 		u.form.AddFormItem(u.newInput("DNSTT Timeout", u.dnsttTimeoutMS, func(value string) { u.dnsttTimeoutMS = value }))
 		u.form.AddFormItem(u.newInput("Query Size", u.dnsttQuerySize, func(value string) { u.dnsttQuerySize = value }))
 		u.form.AddFormItem(u.newInput("Score Threshold", u.dnsttScoreThreshold, func(value string) { u.dnsttScoreThreshold = value }))
@@ -1277,6 +1284,30 @@ func (u *ui) newScanSaveScopeDropDown(label string, selected scanSaveScope, onCh
 
 func (u *ui) newScanProtocolDropDown(label, selected string, onChange func(string)) *tview.DropDown {
 	options := []string{string(scanner.ProtocolUDP), string(scanner.ProtocolTCP), string(scanner.ProtocolBoth)}
+	currentIndex := 0
+	for i, option := range options {
+		if option == selected {
+			currentIndex = i
+			break
+		}
+	}
+	dropdown := tview.NewDropDown().SetLabel(label+": ").SetOptions(options, nil)
+	dropdown.SetCurrentOption(currentIndex)
+	dropdown.SetSelectedFunc(func(text string, index int) {
+		if text != "" {
+			onChange(text)
+		}
+	})
+	return dropdown
+}
+
+func (u *ui) newDNSTTTransportDropDown(label, selected string, onChange func(string)) *tview.DropDown {
+	options := []string{
+		string(dnstt.TransportUDP),
+		string(dnstt.TransportTCP),
+		string(dnstt.TransportDoT),
+		string(dnstt.TransportDoH),
+	}
 	currentIndex := 0
 	for i, option := range options {
 		if option == selected {
@@ -1776,13 +1807,19 @@ func (u *ui) renderDetails() {
 		fmt.Fprintf(&builder, "ASNs: %s\n\n", displayOperatorASNs(operator))
 
 		writeDetailSectionHeader(&builder, "DNS Scan")
+		scanProtocol := u.scanProtocol
+		if result, ok := u.scanCache[operatorKey]; ok && strings.TrimSpace(result.Protocol) != "" {
+			scanProtocol = result.Protocol
+		}
 		fmt.Fprintf(&builder, "Selected targets: %s\n", u.selectedScanSummary(operatorKey))
-		fmt.Fprintf(&builder, "Protocol: %s  Port: %s\n", displayScanProtocol(string(scanner.ProtocolUDP)), displayScanPort(u.scanPort))
+		fmt.Fprintf(&builder, "Protocol: %s  Port: %s\n", displayScanProtocol(scanProtocol), displayScanPort(u.scanPort))
 		fmt.Fprintf(&builder, "Domain: %s  Query Size: %s  Threshold: %d/6\n", displayDNSTTDomain(u.dnsttDomain), displayDNSTTQuerySize(u.dnsttQuerySize), u.currentScoreThreshold())
 		fmt.Fprintf(&builder, "%s Qualified resolvers: %s\n\n", colorBadge("OK"), greenCount(qualifiedCount))
 
 		writeDetailSectionHeader(&builder, "DNSTT Setup")
 		fmt.Fprintf(&builder, "Domain: %s\n", displayDNSTTDomain(u.dnsttDomain))
+		fmt.Fprintf(&builder, "Transport: %s\n", displayDNSTTTransport(u.dnsttTransport))
+		fmt.Fprintf(&builder, "Resolver Endpoint: %s\n", displayDNSTTResolverURL(u.dnsttResolverURL))
 		fmt.Fprintf(&builder, "Timeout: %s ms  Query Size: %s  Threshold: %d/6\n", displayDNSTTTimeout(u.dnsttTimeoutMS), displayDNSTTQuerySize(u.dnsttQuerySize), u.currentScoreThreshold())
 		fmt.Fprintf(&builder, "Pubkey: %s\n", displayDNSTTPubkey(u.dnsttPubkey))
 		fmt.Fprintf(&builder, "Test Nearby IPs: %s\n", normalizeYesNoValue(u.dnsttNearbyIPs))
@@ -2153,14 +2190,15 @@ func (u *ui) startScan() {
 	u.activeScanOperator = operator.Key
 	u.liveProgress = scanProgress{Total: cfg.HostLimit}
 	u.liveResolvers = nil
-	u.scanProtocol = string(scanner.ProtocolUDP)
+	u.scanProtocol = string(cfg.Protocol)
 	ctx, cancel := context.WithCancel(context.Background())
 	u.scanCancel = cancel
 	u.setStatus(fmt.Sprintf("Scanning %s...", operator.Name))
 	u.addActivity(fmt.Sprintf(
-		"Scan started for %s on %s using UDP/%d with %d workers over %s targets against %s (threshold %d/6)",
+		"Scan started for %s on %s using %s/%d with %d workers over %s targets against %s (threshold %d/6)",
 		operator.Name,
 		u.selectedScanSummary(operator.Key),
+		displayScanProtocol(string(cfg.Protocol)),
 		cfg.Port,
 		cfg.Workers,
 		formatCount(u.liveProgress.Total),
@@ -2420,7 +2458,7 @@ func (u *ui) saveResolvers() {
 			TimeoutMillis:   mustInt(u.scanTimeoutMS, 15000),
 			HostLimit:       hostLimit,
 			Port:            mustPort(u.scanPort, 53),
-			Protocol:        string(scanner.ProtocolUDP),
+			Protocol:        displayScanProtocol(u.scanProtocol),
 			TunnelDomain:    strings.TrimSpace(u.dnsttDomain),
 			QuerySize:       mustInt(u.dnsttQuerySize, 0),
 			ScoreThreshold:  u.currentScoreThreshold(),
@@ -2609,13 +2647,17 @@ func (u *ui) scanConfig(entries []model.PrefixEntry) (scanner.Config, error) {
 	if err != nil || scoreThreshold <= 0 || scoreThreshold > 6 {
 		return scanner.Config{}, fmt.Errorf("score threshold must be an integer between 1 and 6")
 	}
+	protocol, err := scanner.ParseProtocol(u.scanProtocol)
+	if err != nil {
+		return scanner.Config{}, fmt.Errorf("protocol must be UDP, TCP, or BOTH")
+	}
 
 	return scanner.Config{
 		Workers:        workers,
 		Timeout:        time.Duration(timeoutMS) * time.Millisecond,
 		HostLimit:      hostLimit,
 		Port:           port,
-		Protocol:       scanner.ProtocolUDP,
+		Protocol:       protocol,
 		Domain:         domain,
 		QuerySize:      querySize,
 		ScoreThreshold: scoreThreshold,
@@ -2689,6 +2731,8 @@ func (u *ui) dnsttConfig(port int) (dnstt.Config, error) {
 		Timeout:        time.Duration(timeoutMS) * time.Millisecond,
 		E2ETimeout:     time.Duration(e2eTimeoutSeconds) * time.Second,
 		Port:           targetPort,
+		Transport:      dnstt.Transport(strings.TrimSpace(u.dnsttTransport)),
+		ResolverURL:    strings.TrimSpace(u.dnsttResolverURL),
 		Domain:         strings.TrimSpace(u.dnsttDomain),
 		Pubkey:         strings.TrimSpace(u.dnsttPubkey),
 		QuerySize:      querySize,
@@ -3354,6 +3398,22 @@ func displayDNSTTDomain(value string) string {
 	return text
 }
 
+func displayDNSTTTransport(value string) string {
+	text := strings.ToUpper(strings.TrimSpace(value))
+	if text == "" {
+		return string(dnstt.TransportUDP)
+	}
+	return text
+}
+
+func displayDNSTTResolverURL(value string) string {
+	text := strings.TrimSpace(value)
+	if text == "" {
+		return "auto"
+	}
+	return text
+}
+
 func displayDNSTTPubkey(value string) string {
 	if strings.TrimSpace(value) == "" {
 		return "tunnel-only"
@@ -3594,7 +3654,7 @@ func writeScanOptionGuide(builder *strings.Builder, width int) {
 	writeWrappedGuideEntry(builder, width, "CFG", "Workers", "Number of concurrent DNS probes. Higher is faster but heavier.")
 	writeWrappedGuideEntry(builder, width, "CFG", "Timeout", "Per-request timeout in milliseconds.")
 	writeWrappedGuideEntry(builder, width, "CFG", "Port", "DNS port to test. Default is `53`.")
-	writeWrappedGuideEntry(builder, width, "CFG", "Protocol", "SlipNet-style scanning uses UDP DNS probes.")
+	writeWrappedGuideEntry(builder, width, "CFG", "Protocol", "Choose UDP, TCP, or BOTH for the SlipNet-style DNS compatibility probes.")
 	writeWrappedGuideEntry(builder, width, "CFG", "DNSTT Domain", "Tunnel domain used by the six SlipNet compatibility probes during the DNS scan.")
 	writeWrappedGuideEntry(builder, width, "CFG", "Query Size", "Optional size budget for the tunnel-realism probe. Leave empty for the default full-capacity probe.")
 	writeWrappedGuideEntry(builder, width, "CFG", "Score Threshold", "Minimum SlipNet compatibility score required before a resolver is considered qualified for DNSTT.")
@@ -3611,6 +3671,8 @@ func writeDNSTTOptionGuide(builder *strings.Builder, width int) {
 	builder.WriteString("[-]\n")
 	builder.WriteString("[gray]Field notes for the DNSTT setup form.[-]\n\n")
 	writeWrappedGuideEntry(builder, width, "CFG", "DNSTT Domain", "Domain used for the tunnel checks. Only resolvers meeting the current score threshold are tested.")
+	writeWrappedGuideEntry(builder, width, "CFG", "DNSTT Transport", "Embedded runtime transport: UDP, TCP, DOT, or DOH. UDP is the default and matches the original scanner flow.")
+	writeWrappedGuideEntry(builder, width, "OPT", "Resolver Endpoint", "Optional override for the embedded runtime transport target. Supports {ip} and {port} placeholders. Required for DOH unless you want a single static HTTPS endpoint.")
 	writeWrappedGuideEntry(builder, width, "CFG", "DNSTT Timeout", "Timeout in milliseconds for the tunnel precheck.")
 	writeWrappedGuideEntry(builder, width, "OPT", "Query Size", "Optional maximum payload for the embedded DNSTT runtime. Leave empty unless you need smaller queries.")
 	writeWrappedGuideEntry(builder, width, "CFG", "Score Threshold", "Minimum SlipNet compatibility score required before a resolver is eligible for DNSTT.")
