@@ -31,7 +31,6 @@ type Resolver struct {
 	IP                   string `json:"ip"`
 	Transport            string `json:"transport,omitempty"`
 	Prefix               string `json:"prefix"`
-	DNSTTNearby          bool   `json:"dnstt_nearby,omitempty"`
 	DNSReachable         bool   `json:"dns_reachable"`
 	ScanStatus           string `json:"scan_status,omitempty"`
 	ScanError            string `json:"scan_error,omitempty"`
@@ -48,12 +47,6 @@ type Resolver struct {
 	TunnelEDNS0Support   bool   `json:"tunnel_edns0_support,omitempty"`
 	TunnelEDNSMaxPayload int    `json:"tunnel_edns_max_payload,omitempty"`
 	TunnelNXDOMAIN       bool   `json:"tunnel_nxdomain,omitempty"`
-	DNSTTChecked         bool   `json:"dnstt_checked,omitempty"`
-	DNSTTTunnelOK        bool   `json:"dnstt_tunnel_ok,omitempty"`
-	DNSTTE2EOK           bool   `json:"dnstt_e2e_ok,omitempty"`
-	DNSTTTunnelMillis    int64  `json:"dnstt_tunnel_ms,omitempty"`
-	DNSTTE2EMillis       int64  `json:"dnstt_e2e_ms,omitempty"`
-	DNSTTError           string `json:"dnstt_error,omitempty"`
 	StormDNSNearby       bool   `json:"stormdns_nearby,omitempty"`
 	StormDNSChecked      bool   `json:"stormdns_checked,omitempty"`
 	StormDNSPassed       bool   `json:"stormdns_passed,omitempty"`
@@ -85,20 +78,5 @@ type ScanResult struct {
 	TransparentProxyDetected bool          `json:"transparent_proxy_detected,omitempty"`
 	StartedAt                time.Time     `json:"started_at"`
 	FinishedAt               time.Time     `json:"finished_at"`
-	DNSTTDomain              string        `json:"dnstt_domain,omitempty"`
-	DNSTTCandidates          uint64        `json:"dnstt_candidate_count,omitempty"`
-	DNSTTChecked             uint64        `json:"dnstt_checked_count,omitempty"`
-	DNSTTTunnel              uint64        `json:"dnstt_tunnel_count,omitempty"`
-	DNSTTE2E                 uint64        `json:"dnstt_e2e_count,omitempty"`
-	DNSTTTimeoutMS           int           `json:"dnstt_timeout_ms,omitempty"`
-	DNSTTE2ETimeS            int           `json:"dnstt_e2e_timeout_s,omitempty"`
-	DNSTTQuerySize           int           `json:"dnstt_query_size,omitempty"`
-	DNSTTE2EPort             int           `json:"dnstt_e2e_port,omitempty"`
-	DNSTTE2EURL              string        `json:"dnstt_e2e_url,omitempty"`
-	DNSTTE2EEnabled          bool          `json:"dnstt_e2e_enabled,omitempty"`
-	DNSTTE2ERequested        bool          `json:"dnstt_e2e_requested,omitempty"`
-	DNSTTTestNearbyIPs       bool          `json:"dnstt_test_nearby_ips,omitempty"`
-	DNSTTStartedAt           time.Time     `json:"dnstt_started_at,omitempty"`
-	DNSTTFinishedAt          time.Time     `json:"dnstt_finished_at,omitempty"`
 	Warnings                 []string      `json:"warnings,omitempty"`
 }

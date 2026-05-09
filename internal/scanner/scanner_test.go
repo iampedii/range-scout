@@ -41,7 +41,7 @@ func TestProbeResolverScoresFullyCompatibleResolvers(t *testing.T) {
 		t.Fatalf("expected max EDNS payload 1232, got %d", resolver.TunnelEDNSMaxPayload)
 	}
 	if !resolver.RecursionAvailable {
-		t.Fatal("expected resolver to qualify for DNSTT")
+		t.Fatal("expected resolver to qualify for tunnel scoring")
 	}
 	if !resolver.Stable {
 		t.Fatal("expected fully compatible resolver to be marked stable")

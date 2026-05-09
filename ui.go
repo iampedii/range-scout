@@ -1132,7 +1132,7 @@ func (u *ui) rebuildCommands() {
 		}
 		if u.shouldReserveButtonRow(index) {
 			// Keep command row heights stable so side panes do not jump when
-			// actions unlock after load / scan / DNSTT transitions.
+			// actions unlock after load / scan / StormDNS transitions.
 			u.commands.AddItem(nil, 3, 0, false)
 		}
 	}
@@ -1717,8 +1717,8 @@ func (u *ui) renderDetails() {
 			if result.TransparentProxyDetected {
 				builder.WriteString("Warning: transparent DNS proxy was detected during the scan.\n")
 			}
-			if !result.DNSTTFinishedAt.IsZero() {
-				fmt.Fprintf(&builder, "Last DNSTT: %s\n", result.DNSTTFinishedAt.Format("2006-01-02 15:04:05"))
+			if u.hasCompletedStormDNS(operator.Key) {
+				builder.WriteString("StormDNS: completed\n")
 				builder.WriteString("Next: Export saves scan successes and failures. Open Test StormDNS to export only StormDNS-passed resolvers.\n\n")
 			} else {
 				builder.WriteString("Last StormDNS: not run yet\n")
@@ -3382,19 +3382,6 @@ func stormDNSStatusLabel(resolver model.Resolver) string {
 	}
 }
 
-func dnsttStatusLabel(resolver model.Resolver) string {
-	switch {
-	case resolver.DNSTTE2EOK:
-		return "e2e"
-	case resolver.DNSTTTunnelOK:
-		return "tunnel"
-	case resolver.DNSTTChecked:
-		return "failed"
-	default:
-		return "-"
-	}
-}
-
 func resolverTunnelDetails(resolver model.Resolver) string {
 	flag := func(ok bool, label string) string {
 		if ok {
@@ -3418,8 +3405,8 @@ func resolverTunnelDetails(resolver model.Resolver) string {
 	)
 }
 
-func showDNSTTError(resolver model.Resolver) bool {
-	return resolver.DNSTTChecked && !resolver.DNSTTE2EOK && strings.TrimSpace(resolver.DNSTTError) != ""
+func showStormDNSError(resolver model.Resolver) bool {
+	return resolver.StormDNSChecked && !resolver.StormDNSPassed && strings.TrimSpace(resolver.StormDNSError) != ""
 }
 
 func writeResolverRows(builder *strings.Builder, resolvers []model.Resolver, customTargets bool, width int) {
@@ -3430,14 +3417,14 @@ func writeResolverRows(builder *strings.Builder, resolvers []model.Resolver, cus
 			displayTransport(resolver.Transport),
 			resolver.TunnelScore,
 			resolver.LatencyMillis,
-			dnsttStatusLabel(resolver),
+			stormDNSStatusLabel(resolver),
 		), width)
 		writeClippedDetailLine(builder, "    caps: "+resolverTunnelDetails(resolver), width)
 		if target := displayResolverTarget(resolver, customTargets); target != "" {
 			writeClippedDetailLine(builder, "    target: "+target, width)
 		}
-		if showDNSTTError(resolver) {
-			writeClippedDetailLine(builder, "    dnstt error: "+displayDNSTTError(resolver.DNSTTError), width)
+		if showStormDNSError(resolver) {
+			writeClippedDetailLine(builder, "    stormdns error: "+displayStormDNSError(resolver.StormDNSError), width)
 		}
 	}
 }
@@ -3463,7 +3450,7 @@ func truncateDisplayText(text string, width int) string {
 	return string(runes[:width-3]) + "..."
 }
 
-func displayDNSTTError(value string) string {
+func displayStormDNSError(value string) string {
 	text := strings.TrimSpace(value)
 	if len(text) <= 120 {
 		return text
@@ -3486,13 +3473,13 @@ func sortResolversForDisplay(resolvers []model.Resolver) []model.Resolver {
 	sorted := slices.Clone(resolvers)
 	slices.SortStableFunc(sorted, func(left, right model.Resolver) int {
 		switch {
-		case left.DNSTTE2EOK != right.DNSTTE2EOK:
-			if left.DNSTTE2EOK {
+		case left.StormDNSPassed != right.StormDNSPassed:
+			if left.StormDNSPassed {
 				return -1
 			}
 			return 1
-		case left.DNSTTTunnelOK != right.DNSTTTunnelOK:
-			if left.DNSTTTunnelOK {
+		case left.StormDNSChecked != right.StormDNSChecked:
+			if left.StormDNSChecked {
 				return -1
 			}
 			return 1
@@ -3795,7 +3782,7 @@ func scanPrefixStrings(entries []model.PrefixEntry) []string {
 func baseScanResolvers(resolvers []model.Resolver) []model.Resolver {
 	filtered := make([]model.Resolver, 0, len(resolvers))
 	for _, resolver := range resolvers {
-		if resolver.DNSTTNearby {
+		if resolver.StormDNSNearby {
 			continue
 		}
 		filtered = append(filtered, resolver)

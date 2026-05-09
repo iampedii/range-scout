@@ -205,12 +205,10 @@ func buildResolverCSV(result model.ScanResult) ([]byte, error) {
 		"response_code",
 		"latency_ms",
 		"prefix",
-		"dnstt_checked",
-		"dnstt_tunnel_ok",
-		"dnstt_e2e_ok",
-		"dnstt_tunnel_ms",
-		"dnstt_e2e_ms",
-		"dnstt_error",
+		"stormdns_checked",
+		"stormdns_passed",
+		"stormdns_latency_ms",
+		"stormdns_error",
 	}); err != nil {
 		return nil, err
 	}
@@ -236,12 +234,10 @@ func buildResolverCSV(result model.ScanResult) ([]byte, error) {
 			resolver.ResponseCode,
 			fmt.Sprintf("%d", resolver.LatencyMillis),
 			resolver.Prefix,
-			fmt.Sprintf("%t", resolver.DNSTTChecked),
-			fmt.Sprintf("%t", resolver.DNSTTTunnelOK),
-			fmt.Sprintf("%t", resolver.DNSTTE2EOK),
-			fmt.Sprintf("%d", resolver.DNSTTTunnelMillis),
-			fmt.Sprintf("%d", resolver.DNSTTE2EMillis),
-			resolver.DNSTTError,
+			fmt.Sprintf("%t", resolver.StormDNSChecked),
+			fmt.Sprintf("%t", resolver.StormDNSPassed),
+			fmt.Sprintf("%d", resolver.StormDNSLatencyMS),
+			resolver.StormDNSError,
 		}
 		if err := writer.Write(record); err != nil {
 			return nil, err

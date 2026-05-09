@@ -409,16 +409,18 @@ func TestApplyLayoutMetricsUpdatesCompactWidthsOnResize(t *testing.T) {
 	}
 }
 
-func TestEffectiveScanSaveScopeStaysScanScopedOnScannerScreenAfterDNSTT(t *testing.T) {
+func TestEffectiveScanSaveScopeStaysScanScopedOnScannerScreenAfterStormDNS(t *testing.T) {
 	u := newUI()
 	operator := u.selectedOperator()
 	u.scanSaveScope = scanSaveAllDNSHosts
 	u.scanCache[operator.Key] = model.ScanResult{
-		Operator:        operator,
-		ScannedTargets:  10,
-		FinishedAt:      time.Now(),
-		DNSTTChecked:    2,
-		DNSTTFinishedAt: time.Now(),
+		Operator:       operator,
+		ScannedTargets: 10,
+		FinishedAt:     time.Now(),
+		Resolvers: []model.Resolver{
+			{IP: "198.51.100.10", StormDNSChecked: true},
+			{IP: "198.51.100.11", StormDNSChecked: true},
+		},
 	}
 	u.mode = screenScanner
 
@@ -427,16 +429,17 @@ func TestEffectiveScanSaveScopeStaysScanScopedOnScannerScreenAfterDNSTT(t *testi
 	}
 }
 
-func TestUpdateDefaultPathsKeepsScanExportPrefixOnScannerScreenAfterDNSTT(t *testing.T) {
+func TestUpdateDefaultPathsKeepsScanExportPrefixOnScannerScreenAfterStormDNS(t *testing.T) {
 	u := newUI()
 	u.selected = 0
 	operator := u.selectedOperator()
 	u.scanCache[operator.Key] = model.ScanResult{
-		Operator:        operator,
-		ScannedTargets:  10,
-		FinishedAt:      time.Now(),
-		DNSTTChecked:    1,
-		DNSTTFinishedAt: time.Now(),
+		Operator:       operator,
+		ScannedTargets: 10,
+		FinishedAt:     time.Now(),
+		Resolvers: []model.Resolver{
+			{IP: "198.51.100.10", StormDNSChecked: true},
+		},
 	}
 	u.mode = screenScanner
 
@@ -447,17 +450,17 @@ func TestUpdateDefaultPathsKeepsScanExportPrefixOnScannerScreenAfterDNSTT(t *tes
 	}
 }
 
-func TestFilterScanResultExcludesNearbyResolversFromScanExports(t *testing.T) {
+func TestFilterScanResultExcludesStormDNSNearbyResolversFromScanExports(t *testing.T) {
 	result := model.ScanResult{
 		Resolvers: []model.Resolver{
 			{IP: "198.51.100.10", TunnelScore: 6},
-			{IP: "198.51.100.11", DNSTTNearby: true},
+			{IP: "198.51.100.11", StormDNSNearby: true},
 		},
 	}
 
 	filtered := filterScanResult(result, scanSaveAllDNSHosts)
 	if len(filtered.Resolvers) != 1 {
-		t.Fatalf("expected nearby DNSTT resolvers to stay out of scan exports, got %d resolvers", len(filtered.Resolvers))
+		t.Fatalf("expected nearby StormDNS resolvers to stay out of scan exports, got %d resolvers", len(filtered.Resolvers))
 	}
 	if filtered.Resolvers[0].IP != "198.51.100.10" {
 		t.Fatalf("unexpected resolver kept in scan export: %s", filtered.Resolvers[0].IP)
@@ -1407,7 +1410,7 @@ func TestPasteModalReopensAtTopWhenBufferExists(t *testing.T) {
 	}
 }
 
-func TestScannerDetailsShowDNSTTErrorForFailedE2E(t *testing.T) {
+func TestScannerDetailsShowStormDNSErrorForFailedVerify(t *testing.T) {
 	u := newUI()
 	operator := u.selectedOperator()
 	u.lookupCache[operator.Key] = model.LookupResult{
@@ -1430,10 +1433,9 @@ func TestScannerDetailsShowDNSTTErrorForFailedE2E(t *testing.T) {
 				DNSReachable:       true,
 				RecursionAvailable: true,
 				Stable:             true,
-				DNSTTChecked:       true,
-				DNSTTTunnelOK:      true,
-				DNSTTE2EOK:         false,
-				DNSTTError:         "socks5 handshake did not complete",
+				StormDNSChecked:    true,
+				StormDNSPassed:     false,
+				StormDNSError:      "socks5 handshake did not complete",
 			},
 		},
 	}
@@ -1443,8 +1445,8 @@ func TestScannerDetailsShowDNSTTErrorForFailedE2E(t *testing.T) {
 	u.renderDetails()
 
 	text := u.details.GetText(true)
-	if !strings.Contains(text, "dnstt error: socks5 handshake did not complete") {
-		t.Fatalf("expected DNSTT error in report section, got: %s", text)
+	if !strings.Contains(text, "stormdns error: socks5 handshake did not complete") {
+		t.Fatalf("expected StormDNS error in report section, got: %s", text)
 	}
 }
 
