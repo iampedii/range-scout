@@ -73,7 +73,7 @@ const (
 	formNoteWrapWidth    = 24
 	formSidebarWrapWidth = 20
 	uiSeparatorLine      = "────────────────────────"
-	uiVersionLabel       = "v0.8.0-rc1"
+	uiVersionLabel       = "v0.8.0"
 	operatorPlaceholder  = "Paste or Import"
 	customOperatorKey    = "custom"
 	customOperatorName   = "Custom Targets"
