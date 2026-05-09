@@ -4,11 +4,44 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
 	"range-scout/internal/model"
 )
+
+func TestLookupOperatorSurfacesBogonWarning(t *testing.T) {
+	// AS returns only a bogon prefix; the result should carry a warning instead
+	// of silently dropping it.
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"data":{"prefixes":[{"prefix":"10.0.0.0/24"}]}}`))
+	}))
+	defer server.Close()
+
+	client := &Client{
+		BaseURL:    server.URL,
+		HTTPClient: server.Client(),
+		ASNDelay:   0,
+	}
+
+	result, _ := client.LookupOperator(context.Background(), model.Operator{
+		Key:  "test",
+		Name: "Test",
+		ASNs: []string{"AS1"},
+	})
+
+	found := false
+	for _, w := range result.Warnings {
+		if strings.Contains(w, "bogon") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("expected a bogon warning in result.Warnings, got %v", result.Warnings)
+	}
+}
 
 func TestLookupOperatorFiltersIPv6AndMergesResults(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

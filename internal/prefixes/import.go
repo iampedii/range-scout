@@ -40,9 +40,12 @@ func ParseTXTTargets(text string) ([]model.PrefixEntry, uint64, uint64, []string
 		return nil, 0, 0, warnings, fmt.Errorf("no valid IPv4 ranges or single IPs found")
 	}
 
-	entries, totalAddresses, totalScanHosts, _, err := Merge(records)
+	entries, totalAddresses, totalScanHosts, droppedBogons, err := Merge(records)
 	if err != nil {
 		return nil, 0, 0, warnings, err
+	}
+	if len(droppedBogons) > 0 {
+		warnings = append(warnings, fmt.Sprintf("dropped %d fully-bogon prefix(es): %s", len(droppedBogons), strings.Join(droppedBogons, ", ")))
 	}
 	return entries, totalAddresses, totalScanHosts, warnings, nil
 }

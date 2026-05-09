@@ -87,9 +87,12 @@ func (c *Client) LookupOperator(ctx context.Context, operator model.Operator) (m
 		return model.LookupResult{}, errors.New(strings.Join(warnings, "; "))
 	}
 
-	entries, totalAddresses, totalScanHosts, _, err := prefixes.Merge(records)
+	entries, totalAddresses, totalScanHosts, droppedBogons, err := prefixes.Merge(records)
 	if err != nil {
 		return model.LookupResult{}, err
+	}
+	for _, p := range droppedBogons {
+		warnings = append(warnings, fmt.Sprintf("dropped fully-bogon prefix: %s", p))
 	}
 
 	result := model.LookupResult{

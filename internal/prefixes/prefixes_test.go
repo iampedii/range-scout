@@ -152,3 +152,25 @@ func TestMergeDropsFullyBogonPrefixes(t *testing.T) {
 		t.Fatalf("expected 2 dropped bogon prefixes, got %d: %v", len(dropped), dropped)
 	}
 }
+
+func TestParseTXTTargetsBogonOnlyProducesWarning(t *testing.T) {
+	// An input containing only bogon prefixes should produce a warning in the
+	// returned warnings slice (not silently discard them).
+	entries, _, _, warnings, err := ParseTXTTargets("10.0.0.0/8\n192.168.0.0/16\n")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("expected no entries for bogon-only input, got %d", len(entries))
+	}
+	found := false
+	for _, w := range warnings {
+		if strings.Contains(w, "bogon") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("expected a bogon warning in warnings, got %v", warnings)
+	}
+}
