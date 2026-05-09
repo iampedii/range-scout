@@ -1,6 +1,7 @@
 package export
 
 import (
+	"bufio"
 	"bytes"
 	"encoding/csv"
 	"encoding/json"
@@ -8,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"range-scout/internal/model"
 	"range-scout/internal/prefixes"
@@ -276,4 +278,57 @@ func buildFailedHostCSV(result FailedHostResult) ([]byte, error) {
 	}
 	writer.Flush()
 	return buffer.Bytes(), writer.Error()
+}
+
+// WriteStormDNSCacheLog writes one line per StormDNS-passed resolver in
+// the StormDNS native cache-log format:
+//
+//	<RFC3339> <ip:port> <domain> UP=<n> DOWN=<n>
+//
+// port is the scan-wide DNS port (range-scout's scanConfig.port). Resolvers
+// with StormDNSPassed=false are skipped.
+func WriteStormDNSCacheLog(path string, resolvers []model.Resolver, domain string, port int) error {
+	if port <= 0 {
+		port = 53
+	}
+	f, err := os.Create(path)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	now := time.Now().UTC().Format(time.RFC3339)
+	bw := bufio.NewWriter(f)
+	for _, r := range resolvers {
+		if !r.StormDNSPassed {
+			continue
+		}
+		fmt.Fprintf(bw, "%s %s:%d %s UP=%d DOWN=%d\n", now, r.IP, port, domain, r.UpMTUBytes, r.DownMTUBytes)
+	}
+	return bw.Flush()
+}
+
+// WriteStormDNSResolversSimple writes one line per StormDNS-passed resolver
+// in the StormDNS client_resolvers.simple format. port 53 is omitted from
+// the output; any other port is retained as <ip>:<port>.
+func WriteStormDNSResolversSimple(path string, resolvers []model.Resolver, port int) error {
+	if port <= 0 {
+		port = 53
+	}
+	f, err := os.Create(path)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	bw := bufio.NewWriter(f)
+	for _, r := range resolvers {
+		if !r.StormDNSPassed {
+			continue
+		}
+		if port == 53 {
+			fmt.Fprintf(bw, "%s\n", r.IP)
+		} else {
+			fmt.Fprintf(bw, "%s:%d\n", r.IP, port)
+		}
+	}
+	return bw.Flush()
 }
