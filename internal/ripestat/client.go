@@ -87,7 +87,7 @@ func (c *Client) LookupOperator(ctx context.Context, operator model.Operator) (m
 		return model.LookupResult{}, errors.New(strings.Join(warnings, "; "))
 	}
 
-	entries, totalAddresses, totalScanHosts, err := prefixes.Merge(records)
+	entries, totalAddresses, totalScanHosts, _, err := prefixes.Merge(records)
 	if err != nil {
 		return model.LookupResult{}, err
 	}

@@ -16,8 +16,14 @@ type SourcePrefix struct {
 	Prefix string
 }
 
-func Merge(records []SourcePrefix) ([]model.PrefixEntry, uint64, uint64, error) {
+// Merge dedupes prefixes by string, attaches all source ASNs, and returns the
+// merged entries sorted by address+bits. Fully-bogon prefixes (entirely inside
+// an IANA special-use range) are dropped from the result and returned in
+// droppedBogons so the UI can surface a warning.
+func Merge(records []SourcePrefix) ([]model.PrefixEntry, uint64, uint64, []string, error) {
 	byPrefix := make(map[string]map[string]struct{})
+	droppedBogons := []string{}
+	seenDropped := map[string]struct{}{}
 
 	for _, record := range records {
 		prefix := strings.TrimSpace(record.Prefix)
@@ -27,9 +33,17 @@ func Merge(records []SourcePrefix) ([]model.PrefixEntry, uint64, uint64, error) 
 
 		parsed, err := netip.ParsePrefix(prefix)
 		if err != nil {
-			return nil, 0, 0, fmt.Errorf("parse prefix %q: %w", prefix, err)
+			return nil, 0, 0, nil, fmt.Errorf("parse prefix %q: %w", prefix, err)
 		}
 		if !parsed.Addr().Is4() {
+			continue
+		}
+
+		if PrefixIsFullyBogon(parsed) {
+			if _, seen := seenDropped[prefix]; !seen {
+				droppedBogons = append(droppedBogons, prefix)
+				seenDropped[prefix] = struct{}{}
+			}
 			continue
 		}
 
@@ -74,7 +88,7 @@ func Merge(records []SourcePrefix) ([]model.PrefixEntry, uint64, uint64, error) 
 		return left.Bits() < right.Bits()
 	})
 
-	return entries, totalAddresses, totalScanHosts, nil
+	return entries, totalAddresses, totalScanHosts, droppedBogons, nil
 }
 
 func EstimateScanTargets(entries []model.PrefixEntry, limit uint64) uint64 {
@@ -89,12 +103,19 @@ func EstimateScanTargets(entries []model.PrefixEntry, limit uint64) uint64 {
 }
 
 func WalkHosts(entries []model.PrefixEntry, limit uint64, yield func(addr netip.Addr, prefix string) bool) (uint64, error) {
-	var emitted uint64
+	walked, _, err := WalkHostsCounted(entries, limit, yield)
+	return walked, err
+}
+
+// WalkHostsCounted is like WalkHosts but additionally returns the number of
+// host IPs skipped because they were in an IANA bogon range.
+func WalkHostsCounted(entries []model.PrefixEntry, limit uint64, yield func(addr netip.Addr, prefix string) bool) (uint64, uint64, error) {
+	var emitted, skipped uint64
 
 	for _, entry := range entries {
 		parsed, err := netip.ParsePrefix(entry.Prefix)
 		if err != nil {
-			return emitted, fmt.Errorf("parse prefix %q: %w", entry.Prefix, err)
+			return emitted, skipped, fmt.Errorf("parse prefix %q: %w", entry.Prefix, err)
 		}
 		if !parsed.Addr().Is4() {
 			continue
@@ -107,16 +128,21 @@ func WalkHosts(entries []model.PrefixEntry, limit uint64, yield func(addr netip.
 
 		for current := start; current <= end; current++ {
 			if limit > 0 && emitted >= limit {
-				return emitted, nil
+				return emitted, skipped, nil
 			}
-			if !yield(uint64ToIPv4(current), entry.Prefix) {
-				return emitted, nil
+			addr := uint64ToIPv4(current)
+			if IsBogon(addr) {
+				skipped++
+				continue
+			}
+			if !yield(addr, entry.Prefix) {
+				return emitted, skipped, nil
 			}
 			emitted++
 		}
 	}
 
-	return emitted, nil
+	return emitted, skipped, nil
 }
 
 func addressCount(prefix netip.Prefix) uint64 {

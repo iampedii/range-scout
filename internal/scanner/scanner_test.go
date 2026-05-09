@@ -57,6 +57,26 @@ func TestScanTracksWorkingCompatibleAndQualifiedCounts(t *testing.T) {
 	port, shutdown := startTestDNSServer(t, fullyCompatibleHandler(domain))
 	defer shutdown()
 
+	// Override walkHostsFn so that 127.0.0.1 (loopback/bogon) is yielded to
+	// the scanner even though WalkHosts normally filters it out. This allows
+	// the in-process test DNS server bound to 127.0.0.1 to be reachable.
+	original := walkHostsFn
+	walkHostsFn = func(entries []model.PrefixEntry, limit uint64, yield func(netip.Addr, string) bool) (uint64, error) {
+		var emitted uint64
+		for _, e := range entries {
+			addr, err := netip.ParseAddr(strings.TrimSuffix(e.Prefix, "/32"))
+			if err != nil {
+				continue
+			}
+			if !yield(addr, e.Prefix) {
+				break
+			}
+			emitted++
+		}
+		return emitted, nil
+	}
+	defer func() { walkHostsFn = original }()
+
 	result, err := Scan(context.Background(), model.Operator{Name: "Test"}, []model.PrefixEntry{
 		{Prefix: "127.0.0.1/32", ScanHosts: 1},
 	}, Config{

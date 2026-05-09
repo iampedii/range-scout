@@ -63,13 +63,13 @@ func TestBuildScanFailureExportUsesExportedSuccessSet(t *testing.T) {
 	result := model.ScanResult{
 		Operator: model.Operator{Name: "MCI"},
 		Prefixes: []model.PrefixEntry{
-			{Prefix: "198.51.100.10/32", ScanHosts: 1},
-			{Prefix: "198.51.100.11/32", ScanHosts: 1},
-			{Prefix: "198.51.100.12/32", ScanHosts: 1},
+			{Prefix: "8.8.8.10/32", ScanHosts: 1},
+			{Prefix: "8.8.8.11/32", ScanHosts: 1},
+			{Prefix: "8.8.8.12/32", ScanHosts: 1},
 		},
 		Resolvers: []model.Resolver{
-			{IP: "198.51.100.10", DNSReachable: true, TunnelScore: 2},
-			{IP: "198.51.100.11", DNSReachable: true, TunnelScore: 0},
+			{IP: "8.8.8.10", DNSReachable: true, TunnelScore: 2},
+			{IP: "8.8.8.11", DNSReachable: true, TunnelScore: 0},
 		},
 		TotalTargets:   3,
 		ScannedTargets: 3,
@@ -88,7 +88,7 @@ func TestBuildScanFailureExportUsesExportedSuccessSet(t *testing.T) {
 	if failed.FailedCount != 2 {
 		t.Fatalf("expected 2 failed hosts, got %d", failed.FailedCount)
 	}
-	if len(failed.FailedHosts) != 2 || failed.FailedHosts[0].IP != "198.51.100.11" || failed.FailedHosts[1].IP != "198.51.100.12" {
+	if len(failed.FailedHosts) != 2 || failed.FailedHosts[0].IP != "8.8.8.11" || failed.FailedHosts[1].IP != "8.8.8.12" {
 		t.Fatalf("unexpected failure hosts: %+v", failed.FailedHosts)
 	}
 }

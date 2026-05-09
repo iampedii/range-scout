@@ -33,6 +33,13 @@ const (
 var (
 	verifyBase32 = base32.StdEncoding.WithPadding(base32.NoPadding)
 	testNetIPs   = []string{"192.0.2.1", "198.51.100.1", "203.0.113.1"}
+
+	// walkHostsFn is the function used to enumerate scan targets. It can be
+	// replaced in tests to inject targets that bypass the bogon filter (e.g.
+	// loopback addresses used by in-process test DNS servers).
+	walkHostsFn = func(entries []model.PrefixEntry, limit uint64, yield func(netip.Addr, string) bool) (uint64, error) {
+		return prefixes.WalkHosts(entries, limit, yield)
+	}
 )
 
 type Config struct {
@@ -240,7 +247,7 @@ func Scan(
 	walkErrCh := make(chan error, 1)
 	go func() {
 		defer close(jobs)
-		_, err := prefixes.WalkHosts(entries, cfg.HostLimit, func(addr netip.Addr, prefix string) bool {
+		_, err := walkHostsFn(entries, cfg.HostLimit, func(addr netip.Addr, prefix string) bool {
 			select {
 			case <-ctx.Done():
 				return false
