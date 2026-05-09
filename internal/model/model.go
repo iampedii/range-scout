@@ -54,6 +54,13 @@ type Resolver struct {
 	DNSTTTunnelMillis    int64  `json:"dnstt_tunnel_ms,omitempty"`
 	DNSTTE2EMillis       int64  `json:"dnstt_e2e_ms,omitempty"`
 	DNSTTError           string `json:"dnstt_error,omitempty"`
+	StormDNSNearby       bool   `json:"stormdns_nearby,omitempty"`
+	StormDNSChecked      bool   `json:"stormdns_checked,omitempty"`
+	StormDNSPassed       bool   `json:"stormdns_passed,omitempty"`
+	StormDNSLatencyMS    int64  `json:"stormdns_latency_ms,omitempty"`
+	StormDNSError        string `json:"stormdns_error,omitempty"`
+	UpMTUBytes           int    `json:"up_mtu_bytes,omitempty"`
+	DownMTUBytes         int    `json:"down_mtu_bytes,omitempty"`
 }
 
 type ScanResult struct {
