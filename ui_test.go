@@ -546,7 +546,7 @@ func TestDNSTTFormPlacesPubkeyUnderDomainInCompactLayout(t *testing.T) {
 	resolverEndpointIndex := findFormItemIndexByLabel(u, "Resolver Endpoint")
 	timeoutIndex := findFormItemIndexByLabel(u, "DNSTT Timeout")
 	if domainIndex == -1 || pubkeyIndex == -1 || transportIndex == -1 || resolverEndpointIndex == -1 || timeoutIndex == -1 {
-		t.Fatalf("expected domain, pubkey, transport, resolver endpoint, and timeout fields in compact layout")
+		t.Fatalf("expected DNSTT domain, pubkey, transport, resolver endpoint, and timeout fields in compact layout (DNSTT screen still uses old form)")
 	}
 	if pubkeyIndex != domainIndex+1 {
 		t.Fatalf("expected pubkey directly after domain, got domain=%d pubkey=%d", domainIndex, pubkeyIndex)
@@ -753,9 +753,9 @@ func TestHandleKeysDoesNotTriggerHotkeysWhileEditingScanField(t *testing.T) {
 	u.mode = screenScanner
 	u.rebuildForm()
 
-	probeFieldIndex := findFormItemIndexByLabel(u, "DNSTT Domain")
+	probeFieldIndex := findFormItemIndexByLabel(u, "StormDNS Domain")
 	if probeFieldIndex == -1 {
-		t.Fatal("expected DNSTT Domain field to be present")
+		t.Fatal("expected StormDNS Domain field to be present")
 	}
 	u.form.SetFocus(probeFieldIndex)
 	u.app.SetFocus(u.form)
@@ -1146,8 +1146,8 @@ func TestScannerFormHidesPrefixActionsAndShowsBack(t *testing.T) {
 	if !u.hasButton("Start Scan") {
 		t.Fatal("expected scanner form to show Start Scan button")
 	}
-	if u.hasButton("Test DNSTT") {
-		t.Fatal("expected scanner form to hide Test DNSTT before a scan completes")
+	if u.hasButton("Test StormDNS") {
+		t.Fatal("expected scanner form to hide Test StormDNS before a scan completes")
 	}
 	if u.hasButton("Export") || u.hasButton("Export Passed") {
 		t.Fatal("expected scanner form to hide export before a scan completes")
@@ -1158,15 +1158,15 @@ func TestScannerFormHidesPrefixActionsAndShowsBack(t *testing.T) {
 	if !hasFormItemLabel(u, "DNS Scan") || !hasFormItemLabel(u, "Next Step") {
 		t.Fatal("expected scanner form to show separate command sections")
 	}
-	if !hasFormItemLabel(u, "DNSTT Domain") {
-		t.Fatal("expected scanner form to show DNSTT domain before a scan completes")
+	if !hasFormItemLabel(u, "StormDNS Domain") {
+		t.Fatal("expected scanner form to show StormDNS domain before a scan completes")
 	}
-	if !hasFormItemLabel(u, "DNSTT Setup") {
-		t.Fatal("expected scanner form to show DNSTT setup lock message before a scan completes")
+	if !hasFormItemLabel(u, "StormDNS Setup") {
+		t.Fatal("expected scanner form to show StormDNS setup lock message before a scan completes")
 	}
 }
 
-func TestScannerFormShowsDNSTTAndExportAfterCompletedScan(t *testing.T) {
+func TestScannerFormShowsStormDNSAndExportAfterCompletedScan(t *testing.T) {
 	u := newUI()
 	operator := u.selectedOperator()
 	u.lookupCache[operator.Key] = model.LookupResult{
@@ -1187,8 +1187,8 @@ func TestScannerFormShowsDNSTTAndExportAfterCompletedScan(t *testing.T) {
 	u.mode = screenScanner
 	u.rebuildForm()
 
-	if !u.hasButton("Test DNSTT") {
-		t.Fatal("expected scanner form to show Test DNSTT after a scan completes")
+	if !u.hasButton("Test StormDNS") {
+		t.Fatal("expected scanner form to show Test StormDNS after a scan completes")
 	}
 	if !u.hasButton("Export") {
 		t.Fatal("expected scanner form to show Export after a scan completes")
@@ -1196,12 +1196,12 @@ func TestScannerFormShowsDNSTTAndExportAfterCompletedScan(t *testing.T) {
 	if !hasFormItemLabel(u, "DNS Scan") || !hasFormItemLabel(u, "Next Step") {
 		t.Fatal("expected scanner form to keep separate command sections after a scan completes")
 	}
-	if !hasFormItemLabel(u, "DNSTT Domain") {
-		t.Fatal("expected scanner form to keep the DNSTT domain field visible")
+	if !hasFormItemLabel(u, "StormDNS Domain") {
+		t.Fatal("expected scanner form to keep the StormDNS domain field visible")
 	}
 }
 
-func TestScannerFormKeepsExportAfterCompletedDNSTT(t *testing.T) {
+func TestScannerFormKeepsExportAfterCompletedStormDNS(t *testing.T) {
 	u := newUI()
 	operator := u.selectedOperator()
 	u.lookupCache[operator.Key] = model.LookupResult{
@@ -1211,13 +1211,11 @@ func TestScannerFormKeepsExportAfterCompletedDNSTT(t *testing.T) {
 		},
 	}
 	u.scanCache[operator.Key] = model.ScanResult{
-		Operator:        operator,
-		ScannedTargets:  10,
-		FinishedAt:      time.Now(),
-		DNSTTChecked:    1,
-		DNSTTFinishedAt: time.Now(),
+		Operator:       operator,
+		ScannedTargets: 10,
+		FinishedAt:     time.Now(),
 		Resolvers: []model.Resolver{
-			{IP: "198.51.100.10", DNSReachable: true, TunnelScore: 6, DNSTTTunnelOK: true},
+			{IP: "198.51.100.10", DNSReachable: true, TunnelScore: 6, StormDNSChecked: true, StormDNSPassed: true},
 		},
 	}
 
@@ -1225,10 +1223,10 @@ func TestScannerFormKeepsExportAfterCompletedDNSTT(t *testing.T) {
 	u.rebuildForm()
 
 	if !u.hasButton("Export") {
-		t.Fatal("expected scanner form to keep Export after DNSTT completes")
+		t.Fatal("expected scanner form to keep Export after StormDNS completes")
 	}
-	if !u.hasButton("Test DNSTT") {
-		t.Fatal("expected scanner form to keep Test DNSTT after DNSTT completes")
+	if !u.hasButton("Test StormDNS") {
+		t.Fatal("expected scanner form to keep Test StormDNS after StormDNS completes")
 	}
 }
 
@@ -1266,7 +1264,7 @@ func TestScannerScreenKeepsCommandRowCountStableAcrossCompletion(t *testing.T) {
 	if got := u.commands.GetItemCount(); got != 4 {
 		t.Fatalf("expected scanner command layout to stay at 4 items after completion, got %d", got)
 	}
-	if !u.hasButton("Export") || !u.hasButton("Test DNSTT") {
+	if !u.hasButton("Export") || !u.hasButton("Test StormDNS") {
 		t.Fatal("expected scanner actions after completion")
 	}
 }
@@ -1535,8 +1533,8 @@ func TestScannerDetailsShowGuideBeforeFirstScan(t *testing.T) {
 	if !strings.Contains(text, "Scan Guide") {
 		t.Fatalf("expected pre-scan guide in details pane, got: %s", text)
 	}
-	if !strings.Contains(text, "DNSTT Domain: Tunnel domain used") {
-		t.Fatalf("expected DNSTT domain guide in details pane, got: %s", text)
+	if !strings.Contains(text, "StormDNS Domain: Tunnel domain used") {
+		t.Fatalf("expected StormDNS domain guide in details pane, got: %s", text)
 	}
 	if !strings.Contains(text, "Score Threshold: Minimum SlipNet") {
 		t.Fatalf("expected score threshold guide in details pane, got: %s", text)
@@ -1693,7 +1691,7 @@ func TestScannerDetailsShowWorkflowStages(t *testing.T) {
 	if !strings.Contains(text, "Step Progress") {
 		t.Fatalf("expected step progress section, got: %s", text)
 	}
-	if !strings.Contains(text, "1. Load Targets") || !strings.Contains(text, "2. DNS Scan") || !strings.Contains(text, "3. DNSTT E2E") {
+	if !strings.Contains(text, "1. Load Targets") || !strings.Contains(text, "2. DNS Scan") || !strings.Contains(text, "3. StormDNS") {
 		t.Fatalf("expected workflow stages, got: %s", text)
 	}
 	if !strings.Contains(text, "DNS Scan\n") || !strings.Contains(text, "Export\n") {
@@ -1739,8 +1737,8 @@ func TestDNSTTDetailsShowDedicatedSections(t *testing.T) {
 	u.renderDetails()
 
 	text := u.details.GetText(true)
-	if !strings.Contains(text, "Step Progress") || !strings.Contains(text, "3. DNSTT E2E") {
-		t.Fatalf("expected staged DNSTT workflow in details, got: %s", text)
+	if !strings.Contains(text, "Step Progress") || !strings.Contains(text, "3. StormDNS") {
+		t.Fatalf("expected staged workflow in details, got: %s", text)
 	}
 	if !strings.Contains(text, "DNSTT Guide") {
 		t.Fatalf("expected DNSTT guide in details, got: %s", text)

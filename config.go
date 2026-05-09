@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"strings"
@@ -18,9 +19,9 @@ var workingDirReader = os.Getwd
 var executablePathReader = os.Executable
 
 type appConfig struct {
-	ImportConfig importStageConfig `json:"importConfig"`
-	ScanConfig   scanStageConfig   `json:"scanConfig"`
-	DNSTTConfig  dnsttStageConfig  `json:"dnsttConfig"`
+	ImportConfig    importStageConfig   `json:"importConfig"`
+	ScanConfig      scanStageConfig     `json:"scanConfig"`
+	StormDNSConfig  stormdnsStageConfig `json:"stormdnsConfig"`
 }
 
 type importStageConfig struct {
@@ -53,52 +54,47 @@ func (c scanStageConfig) MarshalJSON() ([]byte, error) {
 	})
 }
 
-type dnsttStageConfig struct {
+type stormdnsStageConfig struct {
 	Domain         configValue `json:"domain"`
-	Pubkey         configValue `json:"pubkey"`
+	Key            configValue `json:"key"`
 	Transport      configValue `json:"transport"`
 	ResolverURL    configValue `json:"resolverURL"`
 	TimeoutMS      configValue `json:"timeoutMS"`
-	E2ETimeoutS    configValue `json:"e2eTimeoutS"`
 	QuerySize      configValue `json:"querySize"`
 	ScoreThreshold configValue `json:"scoreThreshold"`
-	E2EURL         configValue `json:"e2eURL"`
+	MTURetries     configValue `json:"mtuRetries"`
 	TestNearbyIPs  configValue `json:"testNearbyIPs"`
-	SOCKSUsername  configValue `json:"socksUsername"`
-	SOCKSPassword  configValue `json:"socksPassword"`
-	E2EPort        configValue `json:"e2ePort"`
 }
 
-func (c dnsttStageConfig) MarshalJSON() ([]byte, error) {
-	type savedDNSTTStageConfig struct {
+func (c stormdnsStageConfig) MarshalJSON() ([]byte, error) {
+	type savedStormDNSStageConfig struct {
 		Domain         configValue `json:"domain"`
-		Pubkey         configValue `json:"pubkey"`
+		Key            configValue `json:"key"`
 		Transport      configValue `json:"transport"`
 		ResolverURL    configValue `json:"resolverURL"`
 		TimeoutMS      configValue `json:"timeoutMS"`
-		E2ETimeoutS    configValue `json:"e2eTimeoutS"`
 		QuerySize      configValue `json:"querySize"`
 		ScoreThreshold configValue `json:"scoreThreshold"`
-		E2EURL         configValue `json:"e2eURL"`
+		MTURetries     configValue `json:"mtuRetries"`
 		TestNearbyIPs  configValue `json:"testNearbyIPs"`
-		SOCKSUsername  configValue `json:"socksUsername"`
-		SOCKSPassword  configValue `json:"socksPassword"`
 	}
 
-	return json.Marshal(savedDNSTTStageConfig{
+	return json.Marshal(savedStormDNSStageConfig{
 		Domain:         c.Domain,
-		Pubkey:         c.Pubkey,
+		Key:            c.Key,
 		Transport:      c.Transport,
 		ResolverURL:    c.ResolverURL,
 		TimeoutMS:      c.TimeoutMS,
-		E2ETimeoutS:    c.E2ETimeoutS,
 		QuerySize:      c.QuerySize,
 		ScoreThreshold: c.ScoreThreshold,
-		E2EURL:         c.E2EURL,
+		MTURetries:     c.MTURetries,
 		TestNearbyIPs:  c.TestNearbyIPs,
-		SOCKSUsername:  c.SOCKSUsername,
-		SOCKSPassword:  c.SOCKSPassword,
 	})
+}
+
+// legacyDNSTTBlock is used only for migration: reading old "dnsttConfig" JSON blocks.
+type legacyDNSTTBlock struct {
+	Domain configValue `json:"domain"`
 }
 
 type configValue struct {
@@ -166,6 +162,13 @@ func (c *importFilePathConfig) UnmarshalJSON(data []byte) error {
 	return fmt.Errorf("expected string or object for importFilePaths")
 }
 
+// rawConfigForMigration is used internally to detect legacy dnsttConfig blocks
+// alongside the new stormdnsConfig block.
+type rawConfigForMigration struct {
+	StormDNSConfig    stormdnsStageConfig `json:"stormdnsConfig"`
+	LegacyDNSTTConfig *legacyDNSTTBlock   `json:"dnsttConfig"`
+}
+
 func loadAppConfig(path string) (appConfig, bool, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -175,9 +178,25 @@ func loadAppConfig(path string) (appConfig, bool, error) {
 		return appConfig{}, false, err
 	}
 
+	// First, decode into migration-aware shape to detect legacy dnsttConfig blocks.
+	var raw rawConfigForMigration
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return appConfig{}, true, fmt.Errorf("parse %s: %w", filepath.Base(path), err)
+	}
+
+	if raw.LegacyDNSTTConfig != nil && raw.LegacyDNSTTConfig.Domain.Set && raw.LegacyDNSTTConfig.Domain.Value != "" && !raw.StormDNSConfig.Domain.Set {
+		raw.StormDNSConfig.Domain = raw.LegacyDNSTTConfig.Domain
+		log.Println(`WARN: legacy dnsttConfig block detected; "domain" migrated to stormdnsConfig.domain; other DNSTT-only fields ignored`)
+	}
+
 	var cfg appConfig
 	if err := json.Unmarshal(data, &cfg); err != nil {
 		return appConfig{}, true, fmt.Errorf("parse %s: %w", filepath.Base(path), err)
+	}
+
+	// Apply migrated stormdnsConfig domain if needed.
+	if raw.StormDNSConfig.Domain.Set && !cfg.StormDNSConfig.Domain.Set {
+		cfg.StormDNSConfig.Domain = raw.StormDNSConfig.Domain
 	}
 
 	return cfg, true, nil
@@ -204,19 +223,16 @@ func (u *ui) currentAppConfig() appConfig {
 			Port:      configValue{Value: u.scanPort, Set: true},
 			Protocol:  configValue{Value: mustProtocol(u.scanProtocol, "UDP"), Set: true},
 		},
-		DNSTTConfig: dnsttStageConfig{
-			Domain:         configValue{Value: u.dnsttDomain, Set: true},
-			Pubkey:         configValue{Value: u.dnsttPubkey, Set: true},
-			Transport:      configValue{Value: u.dnsttTransport, Set: true},
-			ResolverURL:    configValue{Value: u.dnsttResolverURL, Set: true},
-			TimeoutMS:      configValue{Value: u.dnsttTimeoutMS, Set: true},
-			E2ETimeoutS:    configValue{Value: u.dnsttE2ETimeoutS, Set: true},
-			QuerySize:      configValue{Value: u.dnsttQuerySize, Set: true},
-			ScoreThreshold: configValue{Value: u.dnsttScoreThreshold, Set: true},
-			E2EURL:         configValue{Value: u.dnsttE2EURL, Set: true},
-			TestNearbyIPs:  configValue{Value: normalizeYesNoValue(u.dnsttNearbyIPs), Set: true},
-			SOCKSUsername:  configValue{Value: u.dnsttSOCKSUsername, Set: true},
-			SOCKSPassword:  configValue{Value: u.dnsttSOCKSPassword, Set: true},
+		StormDNSConfig: stormdnsStageConfig{
+			Domain:         configValue{Value: u.stormdnsDomain, Set: true},
+			Key:            configValue{Value: u.stormdnsKey, Set: true},
+			Transport:      configValue{Value: u.stormdnsTransport, Set: true},
+			ResolverURL:    configValue{Value: u.stormdnsResolverURL, Set: true},
+			TimeoutMS:      configValue{Value: u.stormdnsTimeoutMS, Set: true},
+			QuerySize:      configValue{Value: u.stormdnsQuerySize, Set: true},
+			ScoreThreshold: configValue{Value: u.stormdnsScoreThreshold, Set: true},
+			MTURetries:     configValue{Value: u.stormdnsMTURetries, Set: true},
+			TestNearbyIPs:  configValue{Value: normalizeYesNoValue(u.stormdnsNearbyIPs), Set: true},
 		},
 	}
 }
@@ -289,41 +305,32 @@ func (u *ui) applyAppConfig(cfg appConfig, configDir string) {
 		u.scanProbeURL2 = cfg.ScanConfig.ProbeHost2.Value
 	}
 
-	if cfg.DNSTTConfig.Domain.Set {
-		u.dnsttDomain = cfg.DNSTTConfig.Domain.Value
+	if cfg.StormDNSConfig.Domain.Set {
+		u.stormdnsDomain = cfg.StormDNSConfig.Domain.Value
 	}
-	if cfg.DNSTTConfig.Pubkey.Set {
-		u.dnsttPubkey = cfg.DNSTTConfig.Pubkey.Value
+	if cfg.StormDNSConfig.Key.Set {
+		u.stormdnsKey = cfg.StormDNSConfig.Key.Value
 	}
-	if cfg.DNSTTConfig.Transport.Set {
-		u.dnsttTransport = cfg.DNSTTConfig.Transport.Value
+	if cfg.StormDNSConfig.Transport.Set {
+		u.stormdnsTransport = cfg.StormDNSConfig.Transport.Value
 	}
-	if cfg.DNSTTConfig.ResolverURL.Set {
-		u.dnsttResolverURL = cfg.DNSTTConfig.ResolverURL.Value
+	if cfg.StormDNSConfig.ResolverURL.Set {
+		u.stormdnsResolverURL = cfg.StormDNSConfig.ResolverURL.Value
 	}
-	if cfg.DNSTTConfig.TimeoutMS.Set {
-		u.dnsttTimeoutMS = cfg.DNSTTConfig.TimeoutMS.Value
+	if cfg.StormDNSConfig.TimeoutMS.Set {
+		u.stormdnsTimeoutMS = cfg.StormDNSConfig.TimeoutMS.Value
 	}
-	if cfg.DNSTTConfig.E2ETimeoutS.Set {
-		u.dnsttE2ETimeoutS = cfg.DNSTTConfig.E2ETimeoutS.Value
+	if cfg.StormDNSConfig.QuerySize.Set {
+		u.stormdnsQuerySize = cfg.StormDNSConfig.QuerySize.Value
 	}
-	if cfg.DNSTTConfig.QuerySize.Set {
-		u.dnsttQuerySize = cfg.DNSTTConfig.QuerySize.Value
+	if cfg.StormDNSConfig.ScoreThreshold.Set {
+		u.stormdnsScoreThreshold = cfg.StormDNSConfig.ScoreThreshold.Value
 	}
-	if cfg.DNSTTConfig.ScoreThreshold.Set {
-		u.dnsttScoreThreshold = cfg.DNSTTConfig.ScoreThreshold.Value
+	if cfg.StormDNSConfig.MTURetries.Set {
+		u.stormdnsMTURetries = cfg.StormDNSConfig.MTURetries.Value
 	}
-	if cfg.DNSTTConfig.E2EURL.Set {
-		u.dnsttE2EURL = cfg.DNSTTConfig.E2EURL.Value
-	}
-	if cfg.DNSTTConfig.TestNearbyIPs.Set {
-		u.dnsttNearbyIPs = normalizeYesNoValue(cfg.DNSTTConfig.TestNearbyIPs.Value)
-	}
-	if cfg.DNSTTConfig.SOCKSUsername.Set {
-		u.dnsttSOCKSUsername = cfg.DNSTTConfig.SOCKSUsername.Value
-	}
-	if cfg.DNSTTConfig.SOCKSPassword.Set {
-		u.dnsttSOCKSPassword = cfg.DNSTTConfig.SOCKSPassword.Value
+	if cfg.StormDNSConfig.TestNearbyIPs.Set {
+		u.stormdnsNearbyIPs = normalizeYesNoValue(cfg.StormDNSConfig.TestNearbyIPs.Value)
 	}
 }
 

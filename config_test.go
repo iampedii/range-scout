@@ -22,19 +22,14 @@ func TestLoadAppConfigSupportsFlexibleValues(t *testing.T) {
     "probeHost1": "github.com",
     "probeHost2": "example.com"
   },
-  "dnsttConfig": {
+  "stormdnsConfig": {
     "domain": "t.example.com",
-    "pubkey": "deadbeef",
-    "transport": "DOT",
-    "resolverURL": "https://{ip}:{port}/dns-query",
+    "key": "deadbeef",
     "timeoutMS": 4000,
-    "e2eTimeoutS": 30,
     "querySize": "",
     "scoreThreshold": 3,
-    "e2eURL": "https://example.com/generate_204",
-    "testNearbyIPs": "Yes",
-    "socksUsername": "scanner-user",
-    "socksPassword": "scanner-pass"
+    "mtuRetries": "2",
+    "testNearbyIPs": "Yes"
   }
 }`
 	if err := os.WriteFile(configPath, []byte(configJSON), 0o600); err != nil {
@@ -61,29 +56,17 @@ func TestLoadAppConfigSupportsFlexibleValues(t *testing.T) {
 	if !cfg.ScanConfig.Protocol.Set || cfg.ScanConfig.Protocol.Value != "tcp" {
 		t.Fatalf("unexpected protocol config: %+v", cfg.ScanConfig.Protocol)
 	}
-	if !cfg.DNSTTConfig.TimeoutMS.Set || cfg.DNSTTConfig.TimeoutMS.Value != "4000" {
-		t.Fatalf("unexpected DNSTT timeout config: %+v", cfg.DNSTTConfig.TimeoutMS)
+	if !cfg.StormDNSConfig.TimeoutMS.Set || cfg.StormDNSConfig.TimeoutMS.Value != "4000" {
+		t.Fatalf("unexpected StormDNS timeout config: %+v", cfg.StormDNSConfig.TimeoutMS)
 	}
-	if !cfg.DNSTTConfig.Transport.Set || cfg.DNSTTConfig.Transport.Value != "DOT" {
-		t.Fatalf("unexpected DNSTT transport config: %+v", cfg.DNSTTConfig.Transport)
+	if !cfg.StormDNSConfig.ScoreThreshold.Set || cfg.StormDNSConfig.ScoreThreshold.Value != "3" {
+		t.Fatalf("unexpected StormDNS score threshold config: %+v", cfg.StormDNSConfig.ScoreThreshold)
 	}
-	if !cfg.DNSTTConfig.ResolverURL.Set || cfg.DNSTTConfig.ResolverURL.Value != "https://{ip}:{port}/dns-query" {
-		t.Fatalf("unexpected DNSTT resolver url config: %+v", cfg.DNSTTConfig.ResolverURL)
+	if !cfg.StormDNSConfig.TestNearbyIPs.Set || cfg.StormDNSConfig.TestNearbyIPs.Value != "Yes" {
+		t.Fatalf("unexpected StormDNS nearby setting: %+v", cfg.StormDNSConfig.TestNearbyIPs)
 	}
-	if !cfg.DNSTTConfig.ScoreThreshold.Set || cfg.DNSTTConfig.ScoreThreshold.Value != "3" {
-		t.Fatalf("unexpected DNSTT score threshold config: %+v", cfg.DNSTTConfig.ScoreThreshold)
-	}
-	if !cfg.DNSTTConfig.E2EURL.Set || cfg.DNSTTConfig.E2EURL.Value != "https://example.com/generate_204" {
-		t.Fatalf("unexpected DNSTT e2e url config: %+v", cfg.DNSTTConfig.E2EURL)
-	}
-	if !cfg.DNSTTConfig.TestNearbyIPs.Set || cfg.DNSTTConfig.TestNearbyIPs.Value != "Yes" {
-		t.Fatalf("unexpected DNSTT nearby setting: %+v", cfg.DNSTTConfig.TestNearbyIPs)
-	}
-	if !cfg.DNSTTConfig.SOCKSUsername.Set || cfg.DNSTTConfig.SOCKSUsername.Value != "scanner-user" {
-		t.Fatalf("unexpected DNSTT socks username config: %+v", cfg.DNSTTConfig.SOCKSUsername)
-	}
-	if !cfg.DNSTTConfig.SOCKSPassword.Set || cfg.DNSTTConfig.SOCKSPassword.Value != "scanner-pass" {
-		t.Fatalf("unexpected DNSTT socks password config: %+v", cfg.DNSTTConfig.SOCKSPassword)
+	if !cfg.StormDNSConfig.MTURetries.Set || cfg.StormDNSConfig.MTURetries.Value != "2" {
+		t.Fatalf("unexpected StormDNS mtu retries config: %+v", cfg.StormDNSConfig.MTURetries)
 	}
 }
 
@@ -107,19 +90,14 @@ func TestApplyAppConfigSetsUIState(t *testing.T) {
 			ProbeHost1:    configured("github.com"),
 			ProbeHost2:    configured("example.com"),
 		},
-		DNSTTConfig: dnsttStageConfig{
+		StormDNSConfig: stormdnsStageConfig{
 			Domain:         configured("t.example.com"),
-			Pubkey:         configured("deadbeef"),
-			Transport:      configured("DOH"),
-			ResolverURL:    configured("https://{ip}/dns-query"),
+			Key:            configured("deadbeef"),
 			TimeoutMS:      configured("4500"),
-			E2ETimeoutS:    configured("25"),
 			QuerySize:      configured("1400"),
 			ScoreThreshold: configured("4"),
-			E2EURL:         configured("https://example.com/generate_204"),
+			MTURetries:     configured("3"),
 			TestNearbyIPs:  configured("Yes"),
-			SOCKSUsername:  configured("scanner-user"),
-			SOCKSPassword:  configured("scanner-pass"),
 		},
 	}, configDir)
 
@@ -139,8 +117,9 @@ func TestApplyAppConfigSetsUIState(t *testing.T) {
 	if u.scanProtocol != "BOTH" || u.scanRecursionURL != "cloudflare.com" || u.scanProbeURL1 != "github.com" || u.scanProbeURL2 != "example.com" {
 		t.Fatalf("unexpected scan host config: protocol=%q recursion=%q probe1=%q probe2=%q", u.scanProtocol, u.scanRecursionURL, u.scanProbeURL1, u.scanProbeURL2)
 	}
-	if u.dnsttDomain != "t.example.com" || u.dnsttPubkey != "deadbeef" || u.dnsttTransport != "DOH" || u.dnsttResolverURL != "https://{ip}/dns-query" || u.dnsttTimeoutMS != "4500" || u.dnsttE2ETimeoutS != "25" || u.dnsttQuerySize != "1400" || u.dnsttScoreThreshold != "4" || u.dnsttE2EURL != "https://example.com/generate_204" || u.dnsttNearbyIPs != yesOption || u.dnsttSOCKSUsername != "scanner-user" || u.dnsttSOCKSPassword != "scanner-pass" {
-		t.Fatalf("unexpected DNSTT config: domain=%q pubkey=%q transport=%q resolverURL=%q timeout=%q e2eTimeout=%q querySize=%q threshold=%q e2eURL=%q nearby=%q socksUser=%q socksPass=%q", u.dnsttDomain, u.dnsttPubkey, u.dnsttTransport, u.dnsttResolverURL, u.dnsttTimeoutMS, u.dnsttE2ETimeoutS, u.dnsttQuerySize, u.dnsttScoreThreshold, u.dnsttE2EURL, u.dnsttNearbyIPs, u.dnsttSOCKSUsername, u.dnsttSOCKSPassword)
+	if u.stormdnsDomain != "t.example.com" || u.stormdnsKey != "deadbeef" || u.stormdnsTimeoutMS != "4500" || u.stormdnsQuerySize != "1400" || u.stormdnsScoreThreshold != "4" || u.stormdnsMTURetries != "3" || u.stormdnsNearbyIPs != yesOption {
+		t.Fatalf("unexpected StormDNS config: domain=%q key=%q timeout=%q querySize=%q threshold=%q mtuRetries=%q nearby=%q",
+			u.stormdnsDomain, u.stormdnsKey, u.stormdnsTimeoutMS, u.stormdnsQuerySize, u.stormdnsScoreThreshold, u.stormdnsMTURetries, u.stormdnsNearbyIPs)
 	}
 }
 
@@ -159,18 +138,13 @@ func TestSaveAppConfigRoundTripsCurrentUIState(t *testing.T) {
 	u.scanRecursionURL = "cloudflare.com"
 	u.scanProbeURL1 = "github.com"
 	u.scanProbeURL2 = "example.com"
-	u.dnsttDomain = "t.example.com"
-	u.dnsttPubkey = "deadbeef"
-	u.dnsttTransport = "DOT"
-	u.dnsttResolverURL = "https://{ip}:{port}/dns-query"
-	u.dnsttTimeoutMS = "4200"
-	u.dnsttE2ETimeoutS = "22"
-	u.dnsttQuerySize = "1400"
-	u.dnsttScoreThreshold = "5"
-	u.dnsttE2EURL = "https://example.com/generate_204"
-	u.dnsttNearbyIPs = yesOption
-	u.dnsttSOCKSUsername = "scanner-user"
-	u.dnsttSOCKSPassword = "scanner-pass"
+	u.stormdnsDomain = "t.example.com"
+	u.stormdnsKey = "deadbeef"
+	u.stormdnsTimeoutMS = "4200"
+	u.stormdnsQuerySize = "1400"
+	u.stormdnsScoreThreshold = "5"
+	u.stormdnsMTURetries = "2"
+	u.stormdnsNearbyIPs = yesOption
 
 	if err := saveAppConfig(configPath, u.currentAppConfig()); err != nil {
 		t.Fatalf("saveAppConfig returned error: %v", err)
@@ -199,29 +173,47 @@ func TestSaveAppConfigRoundTripsCurrentUIState(t *testing.T) {
 	if cfg.ScanConfig.RecursionHost.Set || cfg.ScanConfig.ProbeHost1.Set || cfg.ScanConfig.ProbeHost2.Set {
 		t.Fatalf("expected legacy scan host keys to be omitted from saved config: recursion=%+v probe1=%+v probe2=%+v", cfg.ScanConfig.RecursionHost, cfg.ScanConfig.ProbeHost1, cfg.ScanConfig.ProbeHost2)
 	}
-	if got := cfg.DNSTTConfig.E2EURL.Value; got != "https://example.com/generate_204" {
-		t.Fatalf("unexpected saved e2e url value: %q", got)
+	if got := cfg.StormDNSConfig.Domain.Value; got != "t.example.com" {
+		t.Fatalf("unexpected saved domain value: %q", got)
 	}
-	if got := cfg.DNSTTConfig.Transport.Value; got != "DOT" {
-		t.Fatalf("unexpected saved transport value: %q", got)
+	if got := cfg.StormDNSConfig.Key.Value; got != "deadbeef" {
+		t.Fatalf("unexpected saved key value: %q", got)
 	}
-	if got := cfg.DNSTTConfig.ResolverURL.Value; got != "https://{ip}:{port}/dns-query" {
-		t.Fatalf("unexpected saved resolver url value: %q", got)
-	}
-	if got := cfg.DNSTTConfig.ScoreThreshold.Value; got != "5" {
+	if got := cfg.StormDNSConfig.ScoreThreshold.Value; got != "5" {
 		t.Fatalf("unexpected saved score threshold value: %q", got)
 	}
-	if got := cfg.DNSTTConfig.TestNearbyIPs.Value; got != yesOption {
+	if got := cfg.StormDNSConfig.TestNearbyIPs.Value; got != yesOption {
 		t.Fatalf("unexpected saved nearby setting: %q", got)
 	}
-	if got := cfg.DNSTTConfig.SOCKSUsername.Value; got != "scanner-user" {
-		t.Fatalf("unexpected saved socks username value: %q", got)
+	if got := cfg.StormDNSConfig.MTURetries.Value; got != "2" {
+		t.Fatalf("unexpected saved mtu retries value: %q", got)
 	}
-	if got := cfg.DNSTTConfig.SOCKSPassword.Value; got != "scanner-pass" {
-		t.Fatalf("unexpected saved socks password value: %q", got)
+}
+
+func TestLoadConfigMigratesLegacyDNSTTBlock(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.json")
+	body := `{
+		"stormdnsConfig": {},
+		"dnsttConfig": {
+			"domain": "legacy.example.com",
+			"pubkey": "ignored",
+			"e2eURL": "ignored",
+			"socksUsername": "ignored"
+		}
+	}`
+	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+		t.Fatalf("write: %v", err)
 	}
-	if cfg.DNSTTConfig.E2EPort.Set {
-		t.Fatalf("expected legacy e2ePort key to be omitted from saved config, got %+v", cfg.DNSTTConfig.E2EPort)
+	cfg, loaded, err := loadAppConfig(path)
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if !loaded {
+		t.Fatal("expected config to be loaded")
+	}
+	if cfg.StormDNSConfig.Domain.Value != "legacy.example.com" {
+		t.Fatalf("domain not migrated, got %q", cfg.StormDNSConfig.Domain.Value)
 	}
 }
 
