@@ -12,7 +12,7 @@ WORKTREE_STATUS := $(shell git status --porcelain 2>/dev/null)
 DEV_ARTIFACT := $(DIST_DIR)/$(APP)-$(TARGET_OS)-$(TARGET_ARCH)$(TARGET_EXT)
 RELEASE_ARTIFACT := $(DIST_DIR)/$(APP)-$(RELEASE_VERSION)-$(TARGET_OS)-$(TARGET_ARCH)$(TARGET_EXT)
 
-.PHONY: release-version build build-dist build-all build-windows release release-all release-windows release-check run test clean
+.PHONY: release-version build build-dist build-all build-windows release release-all release-windows release-check run test integration-test clean
 
 release-version:
 	@echo $(RELEASE_VERSION)
@@ -69,6 +69,9 @@ run:
 
 test:
 	go test ./...
+
+integration-test:
+	go test -tags=integration -count=1 ./internal/stormdnsembed/...
 
 clean:
 	rm -f $(APP)

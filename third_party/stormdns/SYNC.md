@@ -19,6 +19,13 @@ Synced by:   rasoultaji
    to match the local toolchain (currently `go 1.25.0`). On every re-sync, re-lower
    to whatever the local toolchain supports rather than copying upstream's directive
    verbatim.
+6. Added `pkg/client/probe_api.go` — range-scout-specific wrapper exposing
+   `ProbeOnlyClient` (a one-shot MTU prober) and `Client.RunProbeOnce`.
+   `ProbeOnlyClient` lives in the same package as `Client` so it can call the
+   unexported `probeConnectionMTU` directly, without modifying upstream types.
+   Design choice: option (a) from the plan — exported pass-through via
+   `Client.RunProbeOnce` delegating to `probeConnectionMTU`.  Must be re-applied
+   verbatim on every re-sync.
 
 ## Re-sync procedure
 
