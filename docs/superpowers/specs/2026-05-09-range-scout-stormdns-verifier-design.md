@@ -226,8 +226,9 @@ DNSTT screen → StormDNS screen:
 
 2. Copy source tree into `third_party/stormdns/` with these one-time patches:
    - `internal/client/` → `pkg/client/` (so range-scout can import it across modules).
-   - `third_party/stormdns/go.mod` module path: `module github.com/nullroute1970/StormDNS` → `module range-scout/third_party/stormdns`.
-   - Rewrite imports of `github.com/nullroute1970/StormDNS/internal/...` to `range-scout/third_party/stormdns/...` (with `internal/client` → `pkg/client`).
+   - `third_party/stormdns/go.mod` module path: `module stormdns-go` → `module range-scout/third_party/stormdns`.
+   - `third_party/stormdns/go.mod` Go directive: leave at upstream `go 1.26.3` if range-scout's toolchain supports it; otherwise pin to range-scout's current `go 1.24.1` and verify the vendored code still builds (no Go 1.25/1.26-only stdlib usage).
+   - Rewrite imports of `stormdns-go/...` to `range-scout/third_party/stormdns/...` (with `internal/client` → `pkg/client`).
    - Drop server-side packages (`cmd/server/...`, `internal/server/...`, install scripts, server configs).
 
 3. Preserve upstream `LICENSE` / `COPYING` verbatim. Move upstream README to `third_party/stormdns/UPSTREAM_README.md` for reference.
@@ -246,7 +247,7 @@ Synced by:   <name>
 
 1. Rename `internal/client/` → `pkg/client/`
 2. Rewrite go.mod module path to `range-scout/third_party/stormdns`
-3. Rewrite imports: `github.com/nullroute1970/StormDNS/internal/...` →
+3. Rewrite imports: `stormdns-go/...` →
    `range-scout/third_party/stormdns/...` (internal/client → pkg/client)
 4. Drop server-side packages: <list>
 
