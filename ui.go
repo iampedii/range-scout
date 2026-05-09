@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"net/http"
 	"net/netip"
 	"os"
 	"os/exec"
@@ -20,7 +19,6 @@ import (
 	"github.com/gdamore/tcell/v2"
 	"github.com/rivo/tview"
 
-	"range-scout/internal/dnstt"
 	"range-scout/internal/export"
 	"range-scout/internal/model"
 	"range-scout/internal/operators"
@@ -53,7 +51,6 @@ type targetSourceMode string
 const (
 	screenOperators screen = "operators"
 	screenScanner   screen = "scanner"
-	screenDNSTT     screen = "dnstt"
 	screenStormDNS  screen = "stormdns"
 
 	layoutWide    layoutMode = "wide"
@@ -61,7 +58,6 @@ const (
 
 	scanSaveRecursiveOnly  scanSaveScope = "compatible only"
 	scanSaveAllDNSHosts    scanSaveScope = "all dns hosts"
-	scanSaveDNSTTPassed    scanSaveScope = "dnstt passed only"
 	scanSaveStormDNSPassed scanSaveScope = "stormdns passed only"
 
 	targetSourceRIPE      targetSourceMode = "Automatic API Fetch"
@@ -94,13 +90,6 @@ type scanProgress struct {
 	Working    uint64
 	Compatible uint64
 	Qualified  uint64
-}
-
-type dnsttProgress struct {
-	Tested uint64
-	Total  uint64
-	Tunnel uint64
-	E2E    uint64
 }
 
 type stormdnsProgress struct {
@@ -138,9 +127,6 @@ type ui struct {
 	liveProgress            scanProgress
 	liveResolvers           []model.Resolver
 	scanCancel              context.CancelFunc
-	activeDNSTTOperator     string
-	liveDNSTTProgress       dnsttProgress
-	dnsttCancel             context.CancelFunc
 	activeStormDNSOperator  string
 	liveStormDNSProgress    stormdnsProgress
 	stormdnsCancel          context.CancelFunc
@@ -162,18 +148,6 @@ type ui struct {
 	scanRecursionURL    string
 	scanProbeURL1       string
 	scanProbeURL2       string
-	dnsttDomain         string
-	dnsttPubkey         string
-	dnsttTransport      string
-	dnsttResolverURL    string
-	dnsttTimeoutMS      string
-	dnsttE2ETimeoutS    string
-	dnsttQuerySize      string
-	dnsttScoreThreshold string
-	dnsttE2EURL         string
-	dnsttSOCKSUsername  string
-	dnsttSOCKSPassword  string
-	dnsttNearbyIPs      string
 	stormdnsDomain         string
 	stormdnsKey            string
 	stormdnsTransport      string
@@ -226,13 +200,6 @@ func newUI() *ui {
 		scanRecursionURL:    "google.com",
 		scanProbeURL1:       "github.com",
 		scanProbeURL2:       "example.com",
-		dnsttTimeoutMS:      "15000",
-		dnsttE2ETimeoutS:    "20",
-		dnsttTransport:      string(dnstt.TransportUDP),
-		dnsttQuerySize:      "",
-		dnsttScoreThreshold: "2",
-		dnsttE2EURL:         dnstt.DefaultE2ETestURL,
-		dnsttNearbyIPs:      noOption,
 		stormdnsTimeoutMS:      "15000",
 		stormdnsQuerySize:      "",
 		stormdnsScoreThreshold: "2",
@@ -620,7 +587,7 @@ func (u *ui) handleKeys(event *tcell.EventKey) *tcell.EventKey {
 		u.renderAll()
 		return nil
 	case event.Rune() == 'd':
-		if u.mode == screenDNSTT || u.mode == screenStormDNS {
+		if u.mode == screenStormDNS {
 			u.backToScanner()
 			return nil
 		}
@@ -642,13 +609,10 @@ func (u *ui) handleKeys(event *tcell.EventKey) *tcell.EventKey {
 	case event.Rune() == 't' && u.mode == screenScanner:
 		u.openStormDNSSetup()
 		return nil
-	case event.Rune() == 't' && u.mode == screenDNSTT:
-		u.startDNSTTTest()
-		return nil
 	case event.Rune() == 't' && u.mode == screenStormDNS:
 		u.startStormDNSVerify()
 		return nil
-	case event.Rune() == 'x' && (u.mode == screenScanner || u.mode == screenDNSTT || u.mode == screenStormDNS):
+	case event.Rune() == 'x' && (u.mode == screenScanner || u.mode == screenStormDNS):
 		u.stopActiveOperation()
 		return nil
 	}
@@ -885,7 +849,7 @@ func (u *ui) currentDisplayOperator() (model.Operator, bool) {
 	if operator, ok := u.currentOperator(); ok {
 		return operator, true
 	}
-	if u.hasFetchedPrefixes(customOperatorKey) || u.hasCompletedScan(customOperatorKey) || u.activeScanOperator == customOperatorKey || u.activeDNSTTOperator == customOperatorKey {
+	if u.hasFetchedPrefixes(customOperatorKey) || u.hasCompletedScan(customOperatorKey) || u.activeScanOperator == customOperatorKey {
 		return customTargetsOperator(), true
 	}
 	return model.Operator{}, false
@@ -914,9 +878,6 @@ func (u *ui) rebuildForm() {
 		if u.stormdnsRunning() {
 			u.form.SetTitle("Commands - StormDNS Running")
 			u.addButtonRow(0, buttonSpec{label: "Stop StormDNS", action: u.stopStormDNSVerify})
-		} else if u.dnsttRunning() {
-			u.form.SetTitle("Commands - DNSTT Running")
-			u.addButtonRow(0, buttonSpec{label: "Stop DNSTT", action: u.stopDNSTTTest})
 		} else {
 			u.form.SetTitle("Commands - Scan Running")
 			u.addButtonRow(0, buttonSpec{label: "Stop Scan", action: u.stopScan})
@@ -967,7 +928,7 @@ func (u *ui) rebuildForm() {
 		}
 		u.addButtonRow(2, buttonSpec{label: "Save Config", action: u.saveConfig})
 	case screenScanner:
-		if !hasOperator && !u.hasFetchedPrefixes(targetKey) && !u.hasCompletedScan(targetKey) && u.activeScanOperator != targetKey && u.activeDNSTTOperator != targetKey && u.activeStormDNSOperator != targetKey {
+		if !hasOperator && !u.hasFetchedPrefixes(targetKey) && !u.hasCompletedScan(targetKey) && u.activeScanOperator != targetKey && u.activeStormDNSOperator != targetKey {
 			u.form.SetTitle("Commands - DNS Scan")
 			u.addButtonRow(2,
 				buttonSpec{label: "Back", action: u.backToPrefixes},
@@ -1017,61 +978,6 @@ func (u *ui) rebuildForm() {
 		}
 		u.addButtonRow(2,
 			buttonSpec{label: "Back", action: u.backToPrefixes},
-			buttonSpec{label: "Save Config", action: u.saveConfig},
-		)
-	case screenDNSTT:
-		operatorKey := targetKey
-		if !u.hasCompletedScan(operatorKey) && u.activeScanOperator != operatorKey {
-			u.form.SetTitle("Commands - DNSTT E2E")
-			u.addButtonRow(2,
-				buttonSpec{label: "Back", action: u.backToScanner},
-				buttonSpec{label: "Save Config", action: u.saveConfig},
-			)
-			u.rebuildCommands()
-			return
-		}
-		dnsttCompleted := u.hasCompletedDNSTT(operatorKey)
-
-		u.form.SetTitle("Commands - DNSTT E2E")
-		u.form.AddFormItem(u.newInput("DNSTT Domain", u.dnsttDomain, func(value string) { u.dnsttDomain = value }))
-		u.form.AddFormItem(u.newInput("DNSTT Pubkey", u.dnsttPubkey, func(value string) { u.dnsttPubkey = value }))
-		u.form.AddFormItem(u.newDNSTTTransportDropDown("DNSTT Transport", displayDNSTTTransport(u.dnsttTransport), func(value string) { u.dnsttTransport = value }))
-		u.form.AddFormItem(u.newInput("Resolver Endpoint", u.dnsttResolverURL, func(value string) { u.dnsttResolverURL = value }))
-		u.form.AddFormItem(u.newInput("DNSTT Timeout", u.dnsttTimeoutMS, func(value string) { u.dnsttTimeoutMS = value }))
-		u.form.AddFormItem(u.newInput("Query Size", u.dnsttQuerySize, func(value string) { u.dnsttQuerySize = value }))
-		u.form.AddFormItem(u.newInput("Score Threshold", u.dnsttScoreThreshold, func(value string) { u.dnsttScoreThreshold = value }))
-		u.form.AddFormItem(u.newYesNoDropDown("Test Nearby IPs", u.dnsttNearbyIPs, func(value string) { u.dnsttNearbyIPs = value }))
-		u.form.AddFormItem(u.newInput("E2E Timeout", u.dnsttE2ETimeoutS, func(value string) { u.dnsttE2ETimeoutS = value }))
-		u.form.AddFormItem(u.newInput("E2E URL", u.dnsttE2EURL, func(value string) { u.dnsttE2EURL = value }))
-		u.form.AddFormItem(u.newInput("SOCKS Username", u.dnsttSOCKSUsername, func(value string) { u.dnsttSOCKSUsername = value }))
-		u.form.AddFormItem(u.newPasswordInput("SOCKS Password", u.dnsttSOCKSPassword, func(value string) { u.dnsttSOCKSPassword = value }))
-
-		u.form.AddFormItem(u.newSectionHeader("Export", ""))
-		if dnsttCompleted {
-			u.form.AddFormItem(u.newFormatDropDown("Format", u.scanFormat, func(value string) {
-				u.scanFormat = value
-				u.updateDefaultPaths()
-				u.rebuildForm()
-				u.renderAll()
-			}))
-			u.form.AddFormItem(u.newReadOnlyInput("Save Scope", string(u.effectiveScanSaveScope(operatorKey))))
-			u.form.AddFormItem(u.newInput("Path", u.scanPath, func(value string) { u.scanPath = value }))
-		} else {
-			u.addWrappedReadOnlyInputWidth("Format", "Unlocked after DNSTT", u.formSidebarWrapWidth())
-			u.addWrappedReadOnlyInputWidth("Save Scope", "Unlocked after DNSTT", u.formSidebarWrapWidth())
-			u.addWrappedReadOnlyInputWidth("Path", "Unlocked after DNSTT", u.formSidebarWrapWidth())
-		}
-
-		u.addButtonRow(0, buttonSpec{label: "Start DNSTT", action: u.startDNSTTTest})
-		if dnsttCompleted {
-			u.addButtonRow(
-				1,
-				buttonSpec{label: "Export Passed", action: u.saveResolvers},
-				buttonSpec{label: "Copy Passed", action: u.copyPassedResolvers},
-			)
-		}
-		u.addButtonRow(2,
-			buttonSpec{label: "Back", action: u.backToScanner},
 			buttonSpec{label: "Save Config", action: u.saveConfig},
 		)
 	case screenStormDNS:
@@ -1239,7 +1145,7 @@ func (u *ui) shouldReserveButtonRow(index int) bool {
 	switch u.mode {
 	case screenOperators:
 		return index == 1
-	case screenScanner, screenDNSTT:
+	case screenScanner:
 		return index == 0 || index == 1
 	default:
 		return false
@@ -1383,30 +1289,6 @@ func (u *ui) newScanProtocolDropDown(label, selected string, onChange func(strin
 	return dropdown
 }
 
-func (u *ui) newDNSTTTransportDropDown(label, selected string, onChange func(string)) *tview.DropDown {
-	options := []string{
-		string(dnstt.TransportUDP),
-		string(dnstt.TransportTCP),
-		string(dnstt.TransportDoT),
-		string(dnstt.TransportDoH),
-	}
-	currentIndex := 0
-	for i, option := range options {
-		if option == selected {
-			currentIndex = i
-			break
-		}
-	}
-	dropdown := tview.NewDropDown().SetLabel(label+": ").SetOptions(options, nil)
-	dropdown.SetCurrentOption(currentIndex)
-	dropdown.SetSelectedFunc(func(text string, index int) {
-		if text != "" {
-			onChange(text)
-		}
-	})
-	return dropdown
-}
-
 func (u *ui) renderAll() {
 	u.renderHeader()
 	u.renderDetails()
@@ -1418,8 +1300,6 @@ func (u *ui) renderHeader() {
 	modeLabel := "Targets"
 	if u.mode == screenScanner {
 		modeLabel = "DNS Scan"
-	} else if u.mode == screenDNSTT {
-		modeLabel = "DNSTT E2E"
 	} else if u.mode == screenStormDNS {
 		modeLabel = "StormDNS"
 	}
@@ -1440,14 +1320,6 @@ func (u *ui) renderHeader() {
 		}
 		if u.hasStormDNSCandidates(operatorKey) {
 			parts = append(parts, "t stormdns")
-		}
-		parts = append(parts, "q exit")
-		line2 = strings.Join(parts, "  ")
-	} else if u.mode == screenDNSTT && viewKey != "" {
-		operatorKey := viewKey
-		parts := []string{"p targets", "d dns", "t start"}
-		if u.hasCompletedDNSTT(operatorKey) {
-			parts = append(parts, "s export")
 		}
 		parts = append(parts, "q exit")
 		line2 = strings.Join(parts, "  ")
@@ -1476,25 +1348,6 @@ func (u *ui) openScanner() {
 		return
 	}
 	u.mode = screenScanner
-	u.updateDefaultPaths()
-	u.rebuildForm()
-	u.renderAll()
-}
-
-func (u *ui) openDNSTTSetup() {
-	operator := u.currentTargetOperator()
-	result, ok := u.scanCache[operator.Key]
-	if !ok || len(result.Resolvers) == 0 || !u.hasCompletedScan(operator.Key) {
-		u.setStatus("Run a DNS scan first before opening DNSTT setup.")
-		u.addActivity(fmt.Sprintf("DNSTT setup blocked for %s: no scan results", operator.Name))
-		return
-	}
-	if !u.hasDNSTTCandidates(operator.Key) {
-		u.setStatus("No compatible resolvers meet the current score threshold for DNSTT testing.")
-		u.addActivity(fmt.Sprintf("DNSTT setup blocked for %s: no qualified resolvers", operator.Name))
-		return
-	}
-	u.mode = screenDNSTT
 	u.updateDefaultPaths()
 	u.rebuildForm()
 	u.renderAll()
@@ -1725,12 +1578,6 @@ func (u *ui) renderDetails() {
 			builder.WriteString("Import TXT or Paste Targets first, then open Scan Setup.\n")
 			builder.WriteString("Automatic API Fetch unlocks after you choose an operator.\n")
 			builder.WriteString("Default save paths stay generic until you choose one.\n")
-		} else if u.mode == screenDNSTT {
-			u.details.SetTitle("DNSTT Details")
-			builder.WriteString("No operator selected.\n")
-			builder.WriteString("Load targets, run a DNS scan, then open Test DNSTT.\n")
-			builder.WriteString("Automatic API Fetch unlocks after you choose an operator.\n")
-			builder.WriteString("Default save paths stay generic until you choose one.\n")
 		} else {
 			u.details.SetTitle("Target Details")
 			builder.WriteString("No operator selected.\n")
@@ -1804,13 +1651,11 @@ func (u *ui) renderDetails() {
 		u.details.SetTitle("DNS Scan Details")
 		operatorKey := operator.Key
 		progress, resolvers := u.currentScanState(operatorKey)
-		dnsttState := u.currentDNSTTState(operatorKey)
 		qualifiedCount := countQualifiedResolvers(resolvers, u.currentScoreThreshold())
 		activeScanForCurrentOperator := u.activeScanOperator == operatorKey && u.scanCancel != nil
-		activeDNSTTForCurrentOperator := u.activeDNSTTOperator == operatorKey && u.dnsttCancel != nil
 		lookup, lookupLoaded := u.lookupCache[operatorKey]
 		customTargets := lookupLoaded && lookupUsesCustomTargets(lookup)
-		u.writeStageWorkflow(&builder, operatorKey, lookup, lookupLoaded, progress, dnsttState, activeScanForCurrentOperator, activeDNSTTForCurrentOperator, qualifiedCount)
+		u.writeStageWorkflow(&builder, operatorKey, lookup, lookupLoaded, progress, activeScanForCurrentOperator, qualifiedCount)
 		writeScanOptionGuide(&builder, u.detailsGuideWrapWidth())
 		fmt.Fprintf(&builder, "Operator: %s\n", operator.Name)
 		fmt.Fprintf(&builder, "ASNs: %s\n\n", displayOperatorASNs(operator))
@@ -1902,76 +1747,6 @@ func (u *ui) renderDetails() {
 			builder.WriteString("DNS Hosts\n")
 			writeResolverRows(&builder, resolvers, customTargets, u.detailsRenderWidth())
 		}
-	case screenDNSTT:
-		u.details.SetTitle("DNSTT Details")
-		operatorKey := operator.Key
-		progress, resolvers := u.currentScanState(operatorKey)
-		dnsttState := u.currentDNSTTState(operatorKey)
-		qualifiedCount := countQualifiedResolvers(resolvers, u.currentScoreThreshold())
-		activeScanForCurrentOperator := u.activeScanOperator == operatorKey && u.scanCancel != nil
-		activeDNSTTForCurrentOperator := u.activeDNSTTOperator == operatorKey && u.dnsttCancel != nil
-		lookup, lookupLoaded := u.lookupCache[operatorKey]
-		customTargets := lookupLoaded && lookupUsesCustomTargets(lookup)
-		u.writeStageWorkflow(&builder, operatorKey, lookup, lookupLoaded, progress, dnsttState, activeScanForCurrentOperator, activeDNSTTForCurrentOperator, qualifiedCount)
-		writeDNSTTOptionGuide(&builder, u.detailsGuideWrapWidth())
-		fmt.Fprintf(&builder, "Operator: %s\n", operator.Name)
-		fmt.Fprintf(&builder, "ASNs: %s\n\n", displayOperatorASNs(operator))
-
-		writeDetailSectionHeader(&builder, "DNS Scan")
-		scanProtocol := u.scanProtocol
-		if result, ok := u.scanCache[operatorKey]; ok && strings.TrimSpace(result.Protocol) != "" {
-			scanProtocol = result.Protocol
-		}
-		fmt.Fprintf(&builder, "Selected targets: %s\n", u.selectedScanSummary(operatorKey))
-		fmt.Fprintf(&builder, "Protocol: %s  Port: %s\n", displayScanProtocol(scanProtocol), displayScanPort(u.scanPort))
-		fmt.Fprintf(&builder, "Domain: %s  Query Size: %s  Threshold: %d/6\n", displayDNSTTDomain(u.dnsttDomain), displayDNSTTQuerySize(u.dnsttQuerySize), u.currentScoreThreshold())
-		fmt.Fprintf(&builder, "%s Qualified resolvers: %s\n\n", colorBadge("OK"), greenCount(qualifiedCount))
-
-		writeDetailSectionHeader(&builder, "DNSTT Setup")
-		fmt.Fprintf(&builder, "Domain: %s\n", displayDNSTTDomain(u.dnsttDomain))
-		fmt.Fprintf(&builder, "Transport: %s\n", displayDNSTTTransport(u.dnsttTransport))
-		fmt.Fprintf(&builder, "Resolver Endpoint: %s\n", displayDNSTTResolverURL(u.dnsttResolverURL))
-		fmt.Fprintf(&builder, "Timeout: %s ms  Query Size: %s  Threshold: %d/6\n", displayDNSTTTimeout(u.dnsttTimeoutMS), displayDNSTTQuerySize(u.dnsttQuerySize), u.currentScoreThreshold())
-		fmt.Fprintf(&builder, "Pubkey: %s\n", displayDNSTTPubkey(u.dnsttPubkey))
-		fmt.Fprintf(&builder, "Test Nearby IPs: %s\n", normalizeYesNoValue(u.dnsttNearbyIPs))
-		fmt.Fprintf(&builder, "E2E Timeout: %s s\n", displayDNSTTE2ETimeout(u.dnsttE2ETimeoutS))
-		fmt.Fprintf(&builder, "E2E URL: %s\n", displayDNSTTE2EURL(u.dnsttE2EURL))
-		fmt.Fprintf(&builder, "SOCKS Auth: %s\n", displayDNSTTSOCKSAuth(u.dnsttSOCKSUsername))
-		fmt.Fprintf(&builder, "DNSTT Runtime: %s embedded\n", colorBadge("OK"))
-		builder.WriteString("\n")
-
-		writeDetailSectionHeader(&builder, "DNSTT Results")
-		if activeDNSTTForCurrentOperator {
-			fmt.Fprintf(&builder, "DNSTT running: tested %s/%s  tunnel %s  e2e %s\n\n",
-				formatCount(dnsttState.Tested),
-				formatCount(dnsttState.Total),
-				greenCount(dnsttState.Tunnel),
-				greenCount(dnsttState.E2E),
-			)
-		} else if u.activeDNSTTOperator != "" && u.activeDNSTTOperator != operator.Key {
-			fmt.Fprintf(&builder, "Background DNSTT running for %s.\n\n", u.operatorName(u.activeDNSTTOperator))
-		}
-		fmt.Fprintf(&builder, "DNSTT candidates: %s  Checked: %s  Tunnel OK: %s  E2E OK: %s\n\n",
-			formatCount(dnsttState.Total),
-			formatCount(dnsttState.Tested),
-			greenCount(dnsttState.Tunnel),
-			greenCount(dnsttState.E2E),
-		)
-
-		writeDetailSectionHeader(&builder, "Export")
-		if result, ok := u.scanCache[operatorKey]; ok && !result.DNSTTFinishedAt.IsZero() && !activeDNSTTForCurrentOperator {
-			fmt.Fprintf(&builder, "Last DNSTT: %s\n", result.DNSTTFinishedAt.Format("2006-01-02 15:04:05"))
-			builder.WriteString("Next: Export Passed saves DNSTT-passed resolvers and a paired failures file.\n\n")
-		} else if !activeDNSTTForCurrentOperator {
-			builder.WriteString("No completed DNSTT run cached for this operator.\n")
-			builder.WriteString("Next: Start DNSTT to unlock Export Passed and the paired failures export.\n\n")
-		}
-		if len(resolvers) == 0 {
-			builder.WriteString("No DNS services reached yet.\n")
-		} else {
-			builder.WriteString("DNS Hosts\n")
-			writeResolverRows(&builder, resolvers, customTargets, u.detailsRenderWidth())
-		}
 	case screenStormDNS:
 		u.details.SetTitle("StormDNS Details")
 		operatorKey := operator.Key
@@ -2042,21 +1817,6 @@ func (u *ui) currentScanState(operatorKey string) (scanProgress, []model.Resolve
 		}, result.Resolvers
 	}
 	return scanProgress{}, nil
-}
-
-func (u *ui) currentDNSTTState(operatorKey string) dnsttProgress {
-	if u.activeDNSTTOperator == operatorKey && u.dnsttCancel != nil {
-		return u.liveDNSTTProgress
-	}
-	if result, ok := u.scanCache[operatorKey]; ok {
-		return dnsttProgress{
-			Tested: result.DNSTTChecked,
-			Total:  dnsttCandidateCount(result, u.currentScoreThreshold()),
-			Tunnel: result.DNSTTTunnel,
-			E2E:    result.DNSTTE2E,
-		}
-	}
-	return dnsttProgress{}
 }
 
 func (u *ui) currentStormDNSState(operatorKey string) stormdnsProgress {
@@ -2421,7 +2181,7 @@ func (u *ui) startScan() {
 		cfg.Port,
 		cfg.Workers,
 		formatCount(u.liveProgress.Total),
-		displayDNSTTDomain(cfg.Domain),
+		displayStormDNSDomain(cfg.Domain),
 		cfg.ScoreThreshold,
 	))
 	u.rebuildForm()
@@ -2485,126 +2245,6 @@ func (u *ui) startScan() {
 			u.renderAll()
 		})
 	}(operator, selectedEntries, cfg)
-}
-
-func (u *ui) startDNSTTTest() {
-	if u.busyRunning() {
-		u.blockDuringBusy("DNSTT test blocked while another task is running.")
-		return
-	}
-
-	operator := u.currentTargetOperator()
-	result, ok := u.scanCache[operator.Key]
-	if !ok || len(result.Resolvers) == 0 {
-		u.setStatus("Run a DNS scan first before testing DNSTT.")
-		u.addActivity(fmt.Sprintf("DNSTT blocked for %s: no scan results", operator.Name))
-		return
-	}
-
-	cfg, err := u.dnsttConfig(result.Port)
-	if err != nil {
-		u.setStatus(err.Error())
-		u.addActivity(fmt.Sprintf("DNSTT config invalid for %s", operator.Name))
-		return
-	}
-	cfg.BasePrefixes = scanPrefixStrings(result.Prefixes)
-	e2ERequested := strings.TrimSpace(cfg.Pubkey) != ""
-
-	candidates := countQualifiedResolvers(result.Resolvers, u.currentScoreThreshold())
-	if candidates == 0 {
-		u.setStatus("No compatible resolvers meet the current score threshold for DNSTT testing.")
-		u.addActivity(fmt.Sprintf("DNSTT blocked for %s: no qualified resolvers", operator.Name))
-		return
-	}
-
-	u.activeDNSTTOperator = operator.Key
-	u.liveDNSTTProgress = dnsttProgress{Total: candidates}
-	ctx, cancel := context.WithCancel(context.Background())
-	u.dnsttCancel = cancel
-	u.setStatus(fmt.Sprintf("Testing DNSTT for %s...", operator.Name))
-	u.addActivity(fmt.Sprintf(
-		"DNSTT started for %s on %s qualified resolvers using %s (threshold %d/6, nearby /24 %s)",
-		operator.Name,
-		formatCount(candidates),
-		displayDNSTTDomain(cfg.Domain),
-		cfg.ScoreThreshold,
-		normalizeYesNoValue(u.dnsttNearbyIPs),
-	))
-	u.rebuildForm()
-	u.renderAll()
-
-	go func(op model.Operator, baseResult model.ScanResult, config dnstt.Config) {
-		updatedResolvers, summary, err := dnstt.Test(ctx, baseResult.Resolvers, config, func(event dnstt.Event) {
-			u.app.QueueUpdateDraw(func() {
-				if u.activeDNSTTOperator != op.Key {
-					return
-				}
-				if event.Type == dnstt.EventResolver && event.Item != nil {
-					cached := u.scanCache[op.Key]
-					cached.Resolvers = mergeResolver(cached.Resolvers, *event.Item)
-					cached.Resolvers = sortResolversForDisplay(cached.Resolvers)
-					u.scanCache[op.Key] = cached
-				}
-				u.liveDNSTTProgress = dnsttProgress{
-					Tested: event.Tested,
-					Total:  event.Total,
-					Tunnel: event.Tunnel,
-					E2E:    event.E2E,
-				}
-				u.renderAll()
-			})
-		})
-
-		u.app.QueueUpdateDraw(func() {
-			u.dnsttCancel = nil
-			u.activeDNSTTOperator = ""
-
-			finalResult := baseResult
-			finalResult.Resolvers = updatedResolvers
-			finalResult.Resolvers = sortResolversForDisplay(finalResult.Resolvers)
-			finalResult.DNSTTDomain = strings.TrimSpace(config.Domain)
-			finalResult.DNSTTCandidates = summary.Candidates
-			finalResult.DNSTTChecked = summary.Checked
-			finalResult.DNSTTTunnel = summary.TunnelOK
-			finalResult.DNSTTE2E = summary.E2EOK
-			finalResult.DNSTTTimeoutMS = int(config.Timeout.Milliseconds())
-			finalResult.DNSTTE2ETimeS = int(config.E2ETimeout.Seconds())
-			finalResult.DNSTTQuerySize = config.QuerySize
-			finalResult.DNSTTE2EPort = 0
-			finalResult.DNSTTE2EURL = config.E2EURL
-			finalResult.DNSTTE2EEnabled = strings.TrimSpace(config.Pubkey) != ""
-			finalResult.DNSTTE2ERequested = e2ERequested
-			finalResult.DNSTTTestNearbyIPs = config.TestNearbyIPs
-			finalResult.DNSTTStartedAt = summary.StartedAt
-			finalResult.DNSTTFinishedAt = summary.FinishedAt
-			u.scanCache[op.Key] = finalResult
-
-			if errors.Is(err, context.Canceled) {
-				u.setStatus(fmt.Sprintf("DNSTT canceled for %s. Partial results are available in memory.", op.Name))
-				u.addActivity(fmt.Sprintf("DNSTT canceled for %s after %s resolvers", op.Name, formatCount(summary.Checked)))
-			} else if err != nil {
-				u.setStatus(fmt.Sprintf("DNSTT failed for %s: %v", op.Name, err))
-				u.addActivity(fmt.Sprintf("DNSTT failed for %s", op.Name))
-			} else {
-				u.setStatus(fmt.Sprintf(
-					"DNSTT finished for %s: %s tunnel-ready, %s e2e-ready.",
-					op.Name,
-					formatCount(summary.TunnelOK),
-					formatCount(summary.E2EOK),
-				))
-				u.addActivity(fmt.Sprintf(
-					"DNSTT finished for %s: %s checked, %s tunnel-ready, %s e2e-ready",
-					op.Name,
-					formatCount(summary.Checked),
-					formatCount(summary.TunnelOK),
-					formatCount(summary.E2EOK),
-				))
-			}
-			u.updateDefaultPaths()
-			u.rebuildForm()
-			u.renderAll()
-		})
-	}(operator, result, cfg)
 }
 
 func (u *ui) startStormDNSVerify() {
@@ -2822,24 +2462,9 @@ func (u *ui) stopScan() {
 	u.addActivity("Stop requested for active scan")
 }
 
-func (u *ui) stopDNSTTTest() {
-	if u.dnsttCancel == nil {
-		u.setStatus("No active DNSTT test to stop.")
-		u.addActivity("Stop ignored: no active DNSTT test")
-		return
-	}
-	u.dnsttCancel()
-	u.setStatus("Stopping active DNSTT test...")
-	u.addActivity("Stop requested for active DNSTT test")
-}
-
 func (u *ui) stopActiveOperation() {
 	if u.scanRunning() {
 		u.stopScan()
-		return
-	}
-	if u.dnsttRunning() {
-		u.stopDNSTTTest()
 		return
 	}
 	if u.stormdnsRunning() {
@@ -2886,8 +2511,8 @@ func (u *ui) saveResolvers() {
 			HostLimit:       hostLimit,
 			Port:            mustPort(u.scanPort, 53),
 			Protocol:        displayScanProtocol(u.scanProtocol),
-			TunnelDomain:    strings.TrimSpace(u.dnsttDomain),
-			QuerySize:       mustInt(u.dnsttQuerySize, 0),
+			TunnelDomain:    strings.TrimSpace(u.stormdnsDomain),
+			QuerySize:       mustInt(u.stormdnsQuerySize, 0),
 			ScoreThreshold:  u.currentScoreThreshold(),
 			StartedAt:       time.Now(),
 			FinishedAt:      time.Now(),
@@ -2904,7 +2529,7 @@ func (u *ui) saveResolvers() {
 		return
 	}
 
-	if u.mode == screenDNSTT || u.mode == screenStormDNS {
+	if u.mode == screenStormDNS {
 		filtered := filterScanResult(result, saveScope)
 		if len(filtered.Resolvers) == 0 {
 			u.setStatus(fmt.Sprintf("No matching scan results for %s.", saveScope))
@@ -2924,24 +2549,6 @@ func (u *ui) saveResolvers() {
 			operator.Name,
 			saveScope,
 		)
-		if u.mode == screenDNSTT {
-			failureResult, failureReady := buildDNSTTFailureExport(result)
-			if failureReady {
-				failurePath := pairedOutputPath(savePath, operator.Key, u.dnsttFailureExportPrefix(operator.Key), format, time.Now())
-				if err := export.SaveFailedHosts(failurePath, format, failureResult); err != nil {
-					u.setStatus(fmt.Sprintf("Failure save failed: %v", err))
-					u.addActivity(fmt.Sprintf("Failure export save failed for %s", operator.Name))
-					return
-				}
-				statusLine = fmt.Sprintf("Saved passed resolvers to %s and failures to %s", savePath, failurePath)
-				activityLine = fmt.Sprintf(
-					"Saved %s DNSTT-passed resolvers and %s failures for %s",
-					formatCount(filtered.ReachableCount),
-					formatCount(failureResult.FailedCount),
-					operator.Name,
-				)
-			}
-		}
 		u.rebuildForm()
 		u.renderAll()
 		u.setStatus(statusLine)
@@ -3016,15 +2623,15 @@ func (u *ui) copyPassedResolvers() {
 
 	operator := u.currentTargetOperator()
 	result, ok := u.scanCache[operator.Key]
-	if !ok || !u.hasCompletedDNSTT(operator.Key) {
-		u.setStatus("Run a DNSTT test first before copying passed resolvers.")
-		u.addActivity(fmt.Sprintf("Copy passed skipped for %s: no DNSTT results", operator.Name))
+	if !ok || !u.hasCompletedStormDNS(operator.Key) {
+		u.setStatus("Run a StormDNS test first before copying passed resolvers.")
+		u.addActivity(fmt.Sprintf("Copy passed skipped for %s: no StormDNS results", operator.Name))
 		return
 	}
 
-	filtered := filterScanResult(result, scanSaveDNSTTPassed)
+	filtered := filterScanResult(result, scanSaveStormDNSPassed)
 	if len(filtered.Resolvers) == 0 {
-		u.setStatus("No passed DNSTT resolvers are available to copy.")
+		u.setStatus("No passed StormDNS resolvers are available to copy.")
 		u.addActivity(fmt.Sprintf("Copy passed skipped for %s: no passed resolvers", operator.Name))
 		return
 	}
@@ -3064,15 +2671,15 @@ func (u *ui) scanConfig(entries []model.PrefixEntry) (scanner.Config, error) {
 			return scanner.Config{}, fmt.Errorf("port must be an integer between 1 and 65535")
 		}
 	}
-	domain, err := scanner.NormalizeProbeDomain(u.dnsttDomain)
+	domain, err := scanner.NormalizeProbeDomain(u.stormdnsDomain)
 	if err != nil {
-		return scanner.Config{}, fmt.Errorf("dnstt domain: %w", err)
+		return scanner.Config{}, fmt.Errorf("stormdns domain: %w", err)
 	}
-	querySize := mustInt(u.dnsttQuerySize, 0)
+	querySize := mustInt(u.stormdnsQuerySize, 0)
 	if querySize < 0 {
 		return scanner.Config{}, fmt.Errorf("query size must be zero or greater")
 	}
-	scoreThreshold, err := strconv.Atoi(strings.TrimSpace(u.dnsttScoreThreshold))
+	scoreThreshold, err := strconv.Atoi(strings.TrimSpace(u.stormdnsScoreThreshold))
 	if err != nil || scoreThreshold <= 0 || scoreThreshold > 6 {
 		return scanner.Config{}, fmt.Errorf("score threshold must be an integer between 1 and 6")
 	}
@@ -3090,86 +2697,6 @@ func (u *ui) scanConfig(entries []model.PrefixEntry) (scanner.Config, error) {
 		Domain:         domain,
 		QuerySize:      querySize,
 		ScoreThreshold: scoreThreshold,
-	}, nil
-}
-
-func (u *ui) dnsttConfig(port int) (dnstt.Config, error) {
-	if strings.TrimSpace(u.dnsttDomain) == "" {
-		return dnstt.Config{}, fmt.Errorf("dnstt domain is required")
-	}
-
-	timeoutMS, err := strconv.Atoi(strings.TrimSpace(u.dnsttTimeoutMS))
-	if err != nil || timeoutMS <= 0 {
-		return dnstt.Config{}, fmt.Errorf("dnstt timeout must be a positive integer in milliseconds")
-	}
-
-	e2eTimeoutText := strings.TrimSpace(u.dnsttE2ETimeoutS)
-	e2eTimeoutSeconds := 0
-	if e2eTimeoutText != "" {
-		e2eTimeoutSeconds, err = strconv.Atoi(e2eTimeoutText)
-		if err != nil || e2eTimeoutSeconds <= 0 {
-			return dnstt.Config{}, fmt.Errorf("e2e timeout must be a positive integer in seconds")
-		}
-	}
-
-	querySize := 0
-	querySizeText := strings.TrimSpace(u.dnsttQuerySize)
-	if querySizeText != "" {
-		querySize, err = strconv.Atoi(querySizeText)
-		if err != nil || querySize < 0 {
-			return dnstt.Config{}, fmt.Errorf("query size must be zero or greater")
-		}
-	}
-	scoreThreshold, err := strconv.Atoi(strings.TrimSpace(u.dnsttScoreThreshold))
-	if err != nil || scoreThreshold <= 0 || scoreThreshold > 6 {
-		return dnstt.Config{}, fmt.Errorf("score threshold must be an integer between 1 and 6")
-	}
-
-	e2eURL := strings.TrimSpace(u.dnsttE2EURL)
-	if e2eURL == "" {
-		e2eURL = dnstt.DefaultE2ETestURL
-	}
-	request, err := http.NewRequest(http.MethodGet, e2eURL, nil)
-	if err != nil || request.URL == nil || request.URL.Host == "" {
-		return dnstt.Config{}, fmt.Errorf("e2e url must be a valid http or https URL")
-	}
-	if request.URL.Scheme != "http" && request.URL.Scheme != "https" {
-		return dnstt.Config{}, fmt.Errorf("e2e url must use http or https")
-	}
-	socksUsername := strings.TrimSpace(u.dnsttSOCKSUsername)
-	socksPassword := u.dnsttSOCKSPassword
-	if strings.TrimSpace(u.dnsttPubkey) != "" && socksUsername == "" && socksPassword != "" {
-		return dnstt.Config{}, fmt.Errorf("socks password requires a socks username")
-	}
-
-	targetPort := port
-	if targetPort <= 0 {
-		targetPort = mustPort(u.scanPort, 53)
-	}
-
-	workers := mustInt(u.scanWorkers, 256)
-	if workers > 8 {
-		workers = 8
-	}
-	if workers < 1 {
-		workers = 1
-	}
-
-	return dnstt.Config{
-		Workers:        workers,
-		Timeout:        time.Duration(timeoutMS) * time.Millisecond,
-		E2ETimeout:     time.Duration(e2eTimeoutSeconds) * time.Second,
-		Port:           targetPort,
-		Transport:      dnstt.Transport(strings.TrimSpace(u.dnsttTransport)),
-		ResolverURL:    strings.TrimSpace(u.dnsttResolverURL),
-		Domain:         strings.TrimSpace(u.dnsttDomain),
-		Pubkey:         strings.TrimSpace(u.dnsttPubkey),
-		QuerySize:      querySize,
-		ScoreThreshold: scoreThreshold,
-		E2EURL:         e2eURL,
-		SOCKSUsername:  socksUsername,
-		SOCKSPassword:  socksPassword,
-		TestNearbyIPs:  u.dnsttNearbyIPsEnabled(),
 	}, nil
 }
 
@@ -3222,26 +2749,7 @@ func (u *ui) hasCompletedScan(operatorKey string) bool {
 	return result.ScannedTargets > 0 || len(result.Resolvers) > 0 || !result.FinishedAt.IsZero()
 }
 
-func (u *ui) hasCompletedDNSTT(operatorKey string) bool {
-	result, ok := u.scanCache[operatorKey]
-	if !ok {
-		return false
-	}
-	return result.DNSTTChecked > 0 || result.DNSTTTunnel > 0 || result.DNSTTE2E > 0 || !result.DNSTTFinishedAt.IsZero()
-}
-
-func (u *ui) hasDNSTTCandidates(operatorKey string) bool {
-	result, ok := u.scanCache[operatorKey]
-	if !ok {
-		return false
-	}
-	return countQualifiedResolvers(result.Resolvers, u.currentScoreThreshold()) > 0
-}
-
 func (u *ui) effectiveScanSaveScope(operatorKey string) scanSaveScope {
-	if u.mode == screenDNSTT {
-		return scanSaveDNSTTPassed
-	}
 	if u.mode == screenStormDNS {
 		return scanSaveStormDNSPassed
 	}
@@ -3346,16 +2854,12 @@ func (u *ui) scanRunning() bool {
 	return u.scanCancel != nil
 }
 
-func (u *ui) dnsttRunning() bool {
-	return u.dnsttCancel != nil
-}
-
 func (u *ui) stormdnsRunning() bool {
 	return u.stormdnsCancel != nil
 }
 
 func (u *ui) busyRunning() bool {
-	return u.scanRunning() || u.dnsttRunning() || u.stormdnsRunning()
+	return u.scanRunning() || u.stormdnsRunning()
 }
 
 func (u *ui) restoreSelectedOperator() {
@@ -3376,8 +2880,6 @@ func (u *ui) confirmExit() {
 	message := "Close the application?"
 	if u.scanCancel != nil {
 		message = "A scan is running. Exit and stop it?"
-	} else if u.dnsttCancel != nil {
-		message = "A DNSTT test is running. Exit and stop it?"
 	}
 	modal := tview.NewModal().
 		SetText(message).
@@ -3387,9 +2889,6 @@ func (u *ui) confirmExit() {
 			if buttonLabel == "Exit" {
 				if u.scanCancel != nil {
 					u.scanCancel()
-				}
-				if u.dnsttCancel != nil {
-					u.dnsttCancel()
 				}
 				u.app.Stop()
 			}
@@ -3406,8 +2905,6 @@ func (u *ui) renderStatus() {
 	modeLabel := "target mode"
 	if u.mode == screenScanner {
 		modeLabel = "dns mode"
-	} else if u.mode == screenDNSTT {
-		modeLabel = "dnstt mode"
 	} else if u.mode == screenStormDNS {
 		modeLabel = "stormdns mode"
 	}
@@ -3436,18 +2933,6 @@ func (u *ui) renderStatus() {
 			formatCount(progress.Tested),
 			formatCount(progress.Total),
 			formatCount(progress.Passed),
-		)
-	} else if u.dnsttRunning() {
-		progress := u.currentDNSTTState(u.activeDNSTTOperator)
-		line2 = fmt.Sprintf(
-			"DNSTT %s: %s %s  tested %s/%s  tunnel %s  e2e %s",
-			u.operatorName(u.activeDNSTTOperator),
-			meterBar(progress.Tested, progress.Total, 16),
-			percent(progress.Tested, progress.Total),
-			formatCount(progress.Tested),
-			formatCount(progress.Total),
-			formatCount(progress.Tunnel),
-			formatCount(progress.E2E),
 		)
 	}
 	u.status.SetText(fmt.Sprintf("%s\n%s", line1, line2))
@@ -3489,7 +2974,7 @@ func (u *ui) renderActivity() {
 	u.activity.SetText(builder.String())
 }
 
-func (u *ui) writeStageWorkflow(builder *strings.Builder, operatorKey string, lookup model.LookupResult, lookupLoaded bool, scanState scanProgress, _ dnsttProgress, scanActive bool, _ bool, qualifiedCount uint64) {
+func (u *ui) writeStageWorkflow(builder *strings.Builder, operatorKey string, lookup model.LookupResult, lookupLoaded bool, scanState scanProgress, scanActive bool, qualifiedCount uint64) {
 	builder.WriteString("[lightskyblue::b]Step Progress[-:-:-]\n")
 	builder.WriteString(uiSeparatorLine)
 	builder.WriteString("\n")
@@ -3809,12 +3294,8 @@ func displayTransport(value string) string {
 	return text
 }
 
-func (u *ui) dnsttE2ERequested() bool {
-	return strings.TrimSpace(u.dnsttPubkey) != ""
-}
-
 func (u *ui) currentScoreThreshold() int {
-	value, err := strconv.Atoi(strings.TrimSpace(u.dnsttScoreThreshold))
+	value, err := strconv.Atoi(strings.TrimSpace(u.stormdnsScoreThreshold))
 	if err != nil || value <= 0 {
 		return 2
 	}
@@ -3822,45 +3303,6 @@ func (u *ui) currentScoreThreshold() int {
 		return 6
 	}
 	return value
-}
-
-func displayDNSTTDomain(value string) string {
-	text := strings.TrimSpace(value)
-	if text == "" {
-		return "-"
-	}
-	return text
-}
-
-func displayDNSTTTransport(value string) string {
-	text := strings.ToUpper(strings.TrimSpace(value))
-	if text == "" {
-		return string(dnstt.TransportUDP)
-	}
-	return text
-}
-
-func displayDNSTTResolverURL(value string) string {
-	text := strings.TrimSpace(value)
-	if text == "" {
-		return "auto"
-	}
-	return text
-}
-
-func displayDNSTTPubkey(value string) string {
-	if strings.TrimSpace(value) == "" {
-		return "tunnel-only"
-	}
-	return "set"
-}
-
-func displayDNSTTQuerySize(value string) string {
-	text := strings.TrimSpace(value)
-	if text == "" || text == "0" {
-		return "default"
-	}
-	return text
 }
 
 func displayResultQuerySize(value int) string {
@@ -3877,37 +3319,6 @@ func displayResultScoreThreshold(value int) int {
 	return value
 }
 
-func displayDNSTTTimeout(value string) string {
-	text := strings.TrimSpace(value)
-	if text == "" {
-		return "15000"
-	}
-	return text
-}
-
-func displayDNSTTE2ETimeout(value string) string {
-	text := strings.TrimSpace(value)
-	if text == "" {
-		return "20"
-	}
-	return text
-}
-
-func displayDNSTTE2EURL(value string) string {
-	text := strings.TrimSpace(value)
-	if text == "" {
-		return dnstt.DefaultE2ETestURL
-	}
-	return text
-}
-
-func displayDNSTTSOCKSAuth(username string) string {
-	if strings.TrimSpace(username) == "" {
-		return "disabled"
-	}
-	return "enabled"
-}
-
 func normalizeYesNoValue(value string) string {
 	switch strings.ToLower(strings.TrimSpace(value)) {
 	case "yes", "true", "1", "on":
@@ -3915,10 +3326,6 @@ func normalizeYesNoValue(value string) string {
 	default:
 		return noOption
 	}
-}
-
-func (u *ui) dnsttNearbyIPsEnabled() bool {
-	return normalizeYesNoValue(u.dnsttNearbyIPs) == yesOption
 }
 
 func displayStormDNSDomain(value string) string {
@@ -4152,29 +3559,6 @@ func writeScanOptionGuide(builder *strings.Builder, width int) {
 	builder.WriteString("\n")
 }
 
-func writeDNSTTOptionGuide(builder *strings.Builder, width int) {
-	builder.WriteString("[lightskyblue::b]DNSTT Guide[-:-:-]\n")
-	builder.WriteString("[darkgray]")
-	builder.WriteString(uiSeparatorLine)
-	builder.WriteString("[-]\n")
-	builder.WriteString("[gray]Field notes for the DNSTT setup form.[-]\n\n")
-	writeWrappedGuideEntry(builder, width, "CFG", "DNSTT Domain", "Domain used for the tunnel checks. Only resolvers meeting the current score threshold are tested.")
-	writeWrappedGuideEntry(builder, width, "CFG", "DNSTT Transport", "Embedded runtime transport: UDP, TCP, DOT, or DOH. UDP is the default and matches the original scanner flow.")
-	writeWrappedGuideEntry(builder, width, "OPT", "Resolver Endpoint", "Optional override for the embedded runtime transport target. Supports {ip} and {port} placeholders. Required for DOH unless you want a single static HTTPS endpoint.")
-	writeWrappedGuideEntry(builder, width, "CFG", "DNSTT Timeout", "Timeout in milliseconds for the tunnel precheck.")
-	writeWrappedGuideEntry(builder, width, "OPT", "Query Size", "Optional maximum payload for the embedded DNSTT runtime. Leave empty unless you need smaller queries.")
-	writeWrappedGuideEntry(builder, width, "CFG", "Score Threshold", "Minimum SlipNet compatibility score required before a resolver is eligible for DNSTT.")
-	writeWrappedGuideEntry(builder, width, "CFG", "DNSTT Pubkey", "Leave empty for tunnel-only validation. Set it to enable full DNSTT E2E checks.")
-	writeWrappedGuideEntry(builder, width, "CFG", "Test Nearby IPs", "When set to Yes, any successful original IPv4 resolver triggers one follow-up DNSTT pass for the rest of its /24 subnet. Nearby-discovered IPs do not expand again, and IPs already covered by the original scan ranges are skipped.")
-	writeWrappedGuideEntry(builder, width, "CFG", "E2E Timeout", "Timeout in seconds for the embedded DNSTT runtime plus SOCKS5 end-to-end check.")
-	writeWrappedGuideEntry(builder, width, "CFG", "E2E URL", "HTTP or HTTPS URL fetched through the tunnel after the SOCKS5 proxy starts. Default matches SlipNet's `generate_204` probe.")
-	writeWrappedGuideEntry(builder, width, "OPT", "SOCKS Username", "Optional SOCKS5 username used for the E2E HTTP fetch when the remote DNSTT SOCKS service requires authentication.")
-	writeWrappedGuideEntry(builder, width, "OPT", "SOCKS Password", "Optional SOCKS5 password paired with SOCKS Username for authenticated E2E checks.")
-	writeWrappedGuideEntry(builder, width, "ACT", "Start DNSTT", "Runs tunnel checks for qualified resolvers and, when Pubkey is set, the full E2E check too.")
-	writeWrappedGuideEntry(builder, width, "ACT", "Export Passed", "Available after a completed DNSTT run. Saves passed resolvers to the main file and writes checked DNSTT failures to a paired failures file.")
-	builder.WriteString("\n")
-}
-
 func writeWrappedGuideEntry(builder *strings.Builder, width int, badgeKind, label, text string) {
 	badgeText := visibleBadge(badgeKind)
 	labelText := label + ": "
@@ -4316,21 +3700,6 @@ func pairedOutputPath(basePath, operatorKey, suffix string, format export.Format
 }
 
 func filterScanResult(result model.ScanResult, scope scanSaveScope) model.ScanResult {
-	if scope == scanSaveDNSTTPassed {
-		filtered := make([]model.Resolver, 0, len(result.Resolvers))
-		for _, resolver := range result.Resolvers {
-			if dnsttExportPassed(result, resolver) {
-				filtered = append(filtered, resolver)
-			}
-		}
-		result.Resolvers = filtered
-		result.WorkingCount = uint64(len(filtered))
-		result.CompatibleCount = countCompatibleResolvers(filtered)
-		result.QualifiedCount = countQualifiedResolvers(filtered, displayResultScoreThreshold(result.ScoreThreshold))
-		result.ReachableCount = result.WorkingCount
-		result.RecursiveCount = result.QualifiedCount
-		return result
-	}
 	if scope == scanSaveStormDNSPassed {
 		filtered := make([]model.Resolver, 0, len(result.Resolvers))
 		for _, resolver := range result.Resolvers {
@@ -4409,46 +3778,6 @@ func buildScanFailureExport(result model.ScanResult, successfulResolvers []model
 	exportResult.FailedHosts = failedHosts
 	exportResult.FailedCount = uint64(len(failedHosts))
 	return exportResult, true, nil
-}
-
-func buildDNSTTFailureExport(result model.ScanResult) (export.FailedHostResult, bool) {
-	exportResult := export.FailedHostResult{
-		Operator:       result.Operator,
-		TotalTargets:   dnsttCandidateCount(result, displayResultScoreThreshold(result.ScoreThreshold)),
-		ScannedTargets: result.DNSTTChecked,
-	}
-	if result.DNSTTChecked == 0 {
-		return exportResult, false
-	}
-
-	failedHosts := make([]export.FailedHost, 0)
-	for _, resolver := range result.Resolvers {
-		if !resolver.DNSTTChecked || dnsttExportPassed(result, resolver) {
-			continue
-		}
-		failedHosts = append(failedHosts, export.FailedHost{
-			IP:     resolver.IP,
-			Prefix: resolver.Prefix,
-		})
-	}
-
-	exportResult.FailedHosts = failedHosts
-	exportResult.FailedCount = uint64(len(failedHosts))
-	return exportResult, true
-}
-
-func dnsttExportPassed(result model.ScanResult, resolver model.Resolver) bool {
-	if result.DNSTTE2ERequested {
-		return resolver.DNSTTE2EOK
-	}
-	return resolver.DNSTTTunnelOK
-}
-
-func dnsttCandidateCount(result model.ScanResult, scoreThreshold int) uint64 {
-	if result.DNSTTCandidates > 0 {
-		return result.DNSTTCandidates
-	}
-	return countQualifiedResolvers(result.Resolvers, scoreThreshold)
 }
 
 func scanPrefixStrings(entries []model.PrefixEntry) []string {
@@ -4691,9 +4020,6 @@ func (u *ui) targetExportPrefix(operatorKey string) string {
 }
 
 func (u *ui) scanExportPrefix(operatorKey string) string {
-	if u.mode == screenDNSTT {
-		return "dnstt-scan-success"
-	}
 	if u.mode == screenStormDNS {
 		return "stormdns-scan-success"
 	}
@@ -4702,10 +4028,6 @@ func (u *ui) scanExportPrefix(operatorKey string) string {
 
 func (u *ui) scanFailureExportPrefix(operatorKey string) string {
 	return "dns-scan-failures"
-}
-
-func (u *ui) dnsttFailureExportPrefix(operatorKey string) string {
-	return "dnstt-scan-failures"
 }
 
 func (u *ui) stormdnsFailureExportPrefix(operatorKey string) string {

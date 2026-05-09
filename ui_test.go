@@ -2,7 +2,6 @@ package main
 
 import (
 	"errors"
-	"os"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -12,7 +11,6 @@ import (
 	"github.com/gdamore/tcell/v2"
 	"github.com/rivo/tview"
 
-	"range-scout/internal/dnstt"
 	"range-scout/internal/export"
 	"range-scout/internal/model"
 	"range-scout/internal/scanner"
@@ -267,9 +265,9 @@ func TestScanConfigNormalizesProbeURLs(t *testing.T) {
 	u := newUI()
 	u.scanPort = "5353"
 	u.scanProtocol = string(scanner.ProtocolBoth)
-	u.dnsttDomain = "dns.google"
-	u.dnsttQuerySize = "1400"
-	u.dnsttScoreThreshold = "3"
+	u.stormdnsDomain = "dns.google"
+	u.stormdnsQuerySize = "1400"
+	u.stormdnsScoreThreshold = "3"
 	entries := []model.PrefixEntry{
 		{Prefix: "198.51.100.0/24", ScanHosts: 254},
 		{Prefix: "198.51.101.10/32", ScanHosts: 1},
@@ -322,24 +320,6 @@ func TestNewUIDefaultsScannerPortAndProtocol(t *testing.T) {
 	}
 	if u.scanRecursionURL != "google.com" {
 		t.Fatalf("unexpected default recursion url: %q", u.scanRecursionURL)
-	}
-	if u.dnsttTimeoutMS != "15000" {
-		t.Fatalf("unexpected default DNSTT timeout: %q", u.dnsttTimeoutMS)
-	}
-	if u.dnsttE2EURL != dnstt.DefaultE2ETestURL {
-		t.Fatalf("unexpected default DNSTT e2e url: %q", u.dnsttE2EURL)
-	}
-	if u.dnsttTransport != string(dnstt.TransportUDP) {
-		t.Fatalf("unexpected default DNSTT transport: %q", u.dnsttTransport)
-	}
-	if u.dnsttResolverURL != "" {
-		t.Fatalf("expected blank default DNSTT resolver url, got %q", u.dnsttResolverURL)
-	}
-	if u.dnsttSOCKSUsername != "" || u.dnsttSOCKSPassword != "" {
-		t.Fatalf("expected blank default DNSTT socks auth, got username=%q password=%q", u.dnsttSOCKSUsername, u.dnsttSOCKSPassword)
-	}
-	if u.dnsttNearbyIPs != noOption {
-		t.Fatalf("unexpected default DNSTT nearby setting: %q", u.dnsttNearbyIPs)
 	}
 }
 
@@ -429,139 +409,6 @@ func TestApplyLayoutMetricsUpdatesCompactWidthsOnResize(t *testing.T) {
 	}
 }
 
-func TestDNSTTConfigUsesConfiguredE2EURL(t *testing.T) {
-	u := newUI()
-	u.dnsttDomain = "d.example.com"
-	u.dnsttPubkey = "deadbeef"
-	u.dnsttE2EURL = "https://example.com/generate_204"
-	u.dnsttSOCKSUsername = "scanner-user"
-	u.dnsttSOCKSPassword = "scanner-pass"
-	u.dnsttNearbyIPs = yesOption
-
-	cfg, err := u.dnsttConfig(53)
-	if err != nil {
-		t.Fatalf("dnsttConfig returned error: %v", err)
-	}
-	if cfg.E2EURL != "https://example.com/generate_204" {
-		t.Fatalf("unexpected e2e url: %q", cfg.E2EURL)
-	}
-	if cfg.SOCKSUsername != "scanner-user" || cfg.SOCKSPassword != "scanner-pass" {
-		t.Fatalf("unexpected socks auth config: username=%q password=%q", cfg.SOCKSUsername, cfg.SOCKSPassword)
-	}
-	if !cfg.TestNearbyIPs {
-		t.Fatal("expected nearby IP testing to be enabled")
-	}
-	if cfg.Transport != dnstt.TransportUDP {
-		t.Fatalf("unexpected default dnstt transport: %q", cfg.Transport)
-	}
-	if cfg.ResolverURL != "" {
-		t.Fatalf("expected empty default resolver url, got %q", cfg.ResolverURL)
-	}
-}
-
-func TestDNSTTConfigSupportsDoHResolverTemplate(t *testing.T) {
-	u := newUI()
-	u.dnsttDomain = "d.example.com"
-	u.dnsttPubkey = "deadbeef"
-	u.dnsttTransport = string(dnstt.TransportDoH)
-	u.dnsttResolverURL = "https://{ip}:{port}/dns-query"
-
-	cfg, err := u.dnsttConfig(443)
-	if err != nil {
-		t.Fatalf("dnsttConfig returned error: %v", err)
-	}
-	if cfg.Transport != dnstt.TransportDoH {
-		t.Fatalf("unexpected transport: %q", cfg.Transport)
-	}
-	if cfg.ResolverURL != "https://{ip}:{port}/dns-query" {
-		t.Fatalf("unexpected resolver url: %q", cfg.ResolverURL)
-	}
-}
-
-func TestDNSTTConfigRejectsSOCKSPasswordWithoutUsernameWhenE2EEnabled(t *testing.T) {
-	u := newUI()
-	u.dnsttDomain = "d.example.com"
-	u.dnsttPubkey = "deadbeef"
-	u.dnsttSOCKSUsername = ""
-	u.dnsttSOCKSPassword = "scanner-pass"
-
-	_, err := u.dnsttConfig(53)
-	if err == nil {
-		t.Fatal("expected socks auth validation error")
-	}
-	if !strings.Contains(err.Error(), "socks username") {
-		t.Fatalf("unexpected error: %v", err)
-	}
-}
-
-func TestDNSTTFormRemovesStageRows(t *testing.T) {
-	u := newUI()
-	operator := u.currentTargetOperator()
-	u.scanCache[operator.Key] = model.ScanResult{
-		Operator:       operator,
-		ScannedTargets: 1,
-		FinishedAt:     time.Now(),
-	}
-	u.mode = screenDNSTT
-
-	u.rebuildForm()
-
-	var texts []string
-	for i := 0; i < u.form.GetFormItemCount(); i++ {
-		field, ok := u.form.GetFormItem(i).(*tview.InputField)
-		if !ok {
-			continue
-		}
-		texts = append(texts, field.GetText())
-	}
-
-	joined := strings.Join(texts, "\n")
-	if hasFormItemLabel(u, "DNSTT Tunnel") || hasFormItemLabel(u, "DNSTT E2E") {
-		t.Fatalf("expected DNSTT form to remove tunnel/e2e section rows, got: %s", joined)
-	}
-	if hasFormItemLabel(u, "Tunnel Stage") || hasFormItemLabel(u, "E2E Stage") {
-		t.Fatalf("expected DNSTT form to remove stage rows, got: %s", joined)
-	}
-	if strings.Contains(joined, "Save current stage results") {
-		t.Fatalf("expected DNSTT form headers to omit description text, got: %s", joined)
-	}
-}
-
-func TestDNSTTFormPlacesPubkeyUnderDomainInCompactLayout(t *testing.T) {
-	u := newUI()
-	operator := u.currentTargetOperator()
-	u.scanCache[operator.Key] = model.ScanResult{
-		Operator:       operator,
-		ScannedTargets: 1,
-		FinishedAt:     time.Now(),
-	}
-	u.mode = screenDNSTT
-	u.applyLayout(layoutCompact)
-
-	u.rebuildForm()
-
-	domainIndex := findFormItemIndexByLabel(u, "DNSTT Domain")
-	pubkeyIndex := findFormItemIndexByLabel(u, "DNSTT Pubkey")
-	transportIndex := findFormItemIndexByLabel(u, "DNSTT Transport")
-	resolverEndpointIndex := findFormItemIndexByLabel(u, "Resolver Endpoint")
-	timeoutIndex := findFormItemIndexByLabel(u, "DNSTT Timeout")
-	if domainIndex == -1 || pubkeyIndex == -1 || transportIndex == -1 || resolverEndpointIndex == -1 || timeoutIndex == -1 {
-		t.Fatalf("expected DNSTT domain, pubkey, transport, resolver endpoint, and timeout fields in compact layout (DNSTT screen still uses old form)")
-	}
-	if pubkeyIndex != domainIndex+1 {
-		t.Fatalf("expected pubkey directly after domain, got domain=%d pubkey=%d", domainIndex, pubkeyIndex)
-	}
-	if transportIndex != pubkeyIndex+1 {
-		t.Fatalf("expected transport after pubkey, got pubkey=%d transport=%d", pubkeyIndex, transportIndex)
-	}
-	if resolverEndpointIndex != transportIndex+1 {
-		t.Fatalf("expected resolver endpoint after transport, got transport=%d resolverEndpoint=%d", transportIndex, resolverEndpointIndex)
-	}
-	if timeoutIndex != resolverEndpointIndex+1 {
-		t.Fatalf("expected timeout after resolver endpoint, got resolverEndpoint=%d timeout=%d", resolverEndpointIndex, timeoutIndex)
-	}
-}
-
 func TestEffectiveScanSaveScopeStaysScanScopedOnScannerScreenAfterDNSTT(t *testing.T) {
 	u := newUI()
 	operator := u.selectedOperator()
@@ -577,24 +424,6 @@ func TestEffectiveScanSaveScopeStaysScanScopedOnScannerScreenAfterDNSTT(t *testi
 
 	if got := u.effectiveScanSaveScope(operator.Key); got != scanSaveAllDNSHosts {
 		t.Fatalf("unexpected scanner save scope: %s", got)
-	}
-}
-
-func TestEffectiveScanSaveScopeUsesDNSTTPassedOnDNSTTScreen(t *testing.T) {
-	u := newUI()
-	operator := u.selectedOperator()
-	u.scanSaveScope = scanSaveAllDNSHosts
-	u.scanCache[operator.Key] = model.ScanResult{
-		Operator:        operator,
-		ScannedTargets:  10,
-		FinishedAt:      time.Now(),
-		DNSTTChecked:    2,
-		DNSTTFinishedAt: time.Now(),
-	}
-	u.mode = screenDNSTT
-
-	if got := u.effectiveScanSaveScope(operator.Key); got != scanSaveDNSTTPassed {
-		t.Fatalf("unexpected effective save scope: %s", got)
 	}
 }
 
@@ -618,63 +447,6 @@ func TestUpdateDefaultPathsKeepsScanExportPrefixOnScannerScreenAfterDNSTT(t *tes
 	}
 }
 
-func TestUpdateDefaultPathsUsesDNSTTExportPrefixOnDNSTTScreen(t *testing.T) {
-	u := newUI()
-	u.selected = 0
-	operator := u.selectedOperator()
-	u.scanCache[operator.Key] = model.ScanResult{
-		Operator:        operator,
-		ScannedTargets:  10,
-		FinishedAt:      time.Now(),
-		DNSTTChecked:    1,
-		DNSTTFinishedAt: time.Now(),
-	}
-	u.mode = screenDNSTT
-
-	u.updateDefaultPaths()
-
-	if !strings.Contains(u.scanPath, "exports/dnstt-scan-success-"+operator.Key+"_") {
-		t.Fatalf("expected dnstt success export path, got %q", u.scanPath)
-	}
-}
-
-func TestFilterScanResultDNSTTPassedUsesE2EWhenEnabled(t *testing.T) {
-	result := model.ScanResult{
-		DNSTTE2ERequested: true,
-		DNSTTE2EEnabled:   true,
-		Resolvers: []model.Resolver{
-			{IP: "198.51.100.10", DNSTTE2EOK: true, DNSTTTunnelOK: true},
-			{IP: "198.51.100.11", DNSTTE2EOK: false, DNSTTTunnelOK: true},
-		},
-	}
-
-	filtered := filterScanResult(result, scanSaveDNSTTPassed)
-	if len(filtered.Resolvers) != 1 {
-		t.Fatalf("expected exactly one DNSTT-passed resolver, got %d", len(filtered.Resolvers))
-	}
-	if filtered.Resolvers[0].IP != "198.51.100.10" {
-		t.Fatalf("unexpected resolver kept: %s", filtered.Resolvers[0].IP)
-	}
-}
-
-func TestFilterScanResultDNSTTPassedUsesTunnelWhenE2EDisabled(t *testing.T) {
-	result := model.ScanResult{
-		DNSTTE2EEnabled: false,
-		Resolvers: []model.Resolver{
-			{IP: "198.51.100.10", DNSTTTunnelOK: true},
-			{IP: "198.51.100.11", DNSTTTunnelOK: false},
-		},
-	}
-
-	filtered := filterScanResult(result, scanSaveDNSTTPassed)
-	if len(filtered.Resolvers) != 1 {
-		t.Fatalf("expected exactly one tunnel-passed resolver, got %d", len(filtered.Resolvers))
-	}
-	if filtered.Resolvers[0].IP != "198.51.100.10" {
-		t.Fatalf("unexpected resolver kept: %s", filtered.Resolvers[0].IP)
-	}
-}
-
 func TestFilterScanResultExcludesNearbyResolversFromScanExports(t *testing.T) {
 	result := model.ScanResult{
 		Resolvers: []model.Resolver{
@@ -689,55 +461,6 @@ func TestFilterScanResultExcludesNearbyResolversFromScanExports(t *testing.T) {
 	}
 	if filtered.Resolvers[0].IP != "198.51.100.10" {
 		t.Fatalf("unexpected resolver kept in scan export: %s", filtered.Resolvers[0].IP)
-	}
-}
-
-func TestFilterScanResultDNSTTPassedRequiresE2EWhenRequestedButSkipped(t *testing.T) {
-	result := model.ScanResult{
-		DNSTTE2ERequested: true,
-		DNSTTE2EEnabled:   false,
-		Resolvers: []model.Resolver{
-			{IP: "198.51.100.10", DNSTTTunnelOK: true, DNSTTE2EOK: false},
-			{IP: "198.51.100.11", DNSTTTunnelOK: false, DNSTTE2EOK: false},
-		},
-	}
-
-	filtered := filterScanResult(result, scanSaveDNSTTPassed)
-	if len(filtered.Resolvers) != 0 {
-		t.Fatalf("expected no DNSTT-passed resolvers when e2e was requested but skipped, got %d", len(filtered.Resolvers))
-	}
-}
-
-func TestBuildDNSTTFailureExportUsesCheckedFailures(t *testing.T) {
-	result := model.ScanResult{
-		Operator:          model.Operator{Name: "MCI"},
-		ScoreThreshold:    2,
-		DNSTTCandidates:   4,
-		DNSTTChecked:      2,
-		DNSTTE2ERequested: true,
-		DNSTTE2EEnabled:   true,
-		Resolvers: []model.Resolver{
-			{IP: "198.51.100.10", Prefix: "198.51.100.0/24", TunnelScore: 6, DNSTTChecked: true, DNSTTE2EOK: true, DNSTTTunnelOK: true},
-			{IP: "198.51.100.11", Prefix: "198.51.100.0/24", TunnelScore: 6, DNSTTChecked: true, DNSTTE2EOK: false, DNSTTTunnelOK: true},
-			{IP: "198.51.100.12", Prefix: "198.51.100.0/24", TunnelScore: 6, DNSTTChecked: false, DNSTTE2EOK: false, DNSTTTunnelOK: false},
-		},
-	}
-
-	failed, ready := buildDNSTTFailureExport(result)
-	if !ready {
-		t.Fatal("expected DNSTT failure export to be ready")
-	}
-	if failed.TotalTargets != 4 {
-		t.Fatalf("expected 4 DNSTT targets, got %d", failed.TotalTargets)
-	}
-	if failed.ScannedTargets != 2 {
-		t.Fatalf("expected 2 checked targets, got %d", failed.ScannedTargets)
-	}
-	if failed.FailedCount != 1 {
-		t.Fatalf("expected 1 DNSTT failure, got %d", failed.FailedCount)
-	}
-	if len(failed.FailedHosts) != 1 || failed.FailedHosts[0].IP != "198.51.100.11" {
-		t.Fatalf("unexpected DNSTT failures: %+v", failed.FailedHosts)
 	}
 }
 
@@ -1269,176 +992,17 @@ func TestScannerScreenKeepsCommandRowCountStableAcrossCompletion(t *testing.T) {
 	}
 }
 
-func TestOpenDNSTTSetupShowsDedicatedScreen(t *testing.T) {
+func TestCopyPassedResolversCopiesOnlyStormDNSPassedIPs(t *testing.T) {
 	u := newUI()
 	operator := u.selectedOperator()
-	u.lookupCache[operator.Key] = model.LookupResult{
-		Operator: operator,
-		Entries: []model.PrefixEntry{
-			{Prefix: "198.51.100.0/24", ScanHosts: 254},
-		},
-	}
-	u.scanCache[operator.Key] = model.ScanResult{
-		Operator:        operator,
-		ScannedTargets:  10,
-		FinishedAt:      time.Now(),
-		DNSTTChecked:    1,
-		DNSTTFinishedAt: time.Now(),
-		Resolvers: []model.Resolver{
-			{IP: "198.51.100.10", DNSReachable: true, TunnelScore: 6, DNSTTTunnelOK: true},
-		},
-	}
-
-	u.openDNSTTSetup()
-
-	if u.mode != screenDNSTT {
-		t.Fatalf("expected DNSTT setup screen, got %q", u.mode)
-	}
-	if !u.hasButton("Start DNSTT") {
-		t.Fatal("expected DNSTT screen to show Start DNSTT")
-	}
-	if !hasFormItemLabel(u, "DNSTT Domain") {
-		t.Fatal("expected DNSTT config fields on DNSTT screen")
-	}
-	if !hasFormItemLabel(u, "DNSTT Pubkey") {
-		t.Fatal("expected DNSTT pubkey field on DNSTT screen")
-	}
-	if !hasFormItemLabel(u, "SOCKS Username") || !hasFormItemLabel(u, "SOCKS Password") {
-		t.Fatal("expected DNSTT screen to show SOCKS auth fields")
-	}
-	if !hasFormItemLabel(u, "Test Nearby IPs") {
-		t.Fatal("expected DNSTT nearby IP dropdown on DNSTT screen")
-	}
-	if hasFormItemLabel(u, "DNSTT Tunnel") || hasFormItemLabel(u, "DNSTT E2E") || hasFormItemLabel(u, "Tunnel Stage") || hasFormItemLabel(u, "E2E Stage") {
-		t.Fatal("expected DNSTT screen to omit tunnel/e2e section and stage rows")
-	}
-}
-
-func TestDNSTTNearbyIPsFieldIsDropdownWithNoDefault(t *testing.T) {
-	u := newUI()
-	operator := u.selectedOperator()
-	u.lookupCache[operator.Key] = model.LookupResult{
-		Operator: operator,
-		Entries: []model.PrefixEntry{
-			{Prefix: "198.51.100.0/24", ScanHosts: 254},
-		},
-	}
 	u.scanCache[operator.Key] = model.ScanResult{
 		Operator:       operator,
-		ScannedTargets: 10,
 		FinishedAt:     time.Now(),
-	}
-
-	u.mode = screenDNSTT
-	u.rebuildForm()
-
-	index := findFormItemIndexByLabel(u, "Test Nearby IPs")
-	if index == -1 {
-		t.Fatal("expected nearby IP field on DNSTT form")
-	}
-	dropdown, ok := u.form.GetFormItem(index).(*tview.DropDown)
-	if !ok {
-		t.Fatalf("expected nearby IP field to be a dropdown, got %T", u.form.GetFormItem(index))
-	}
-	_, current := dropdown.GetCurrentOption()
-	if current != noOption {
-		t.Fatalf("expected nearby IP dropdown to default to %q, got %q", noOption, current)
-	}
-}
-
-func TestDNSTTScreenShowsExportPassedAfterCompletedDNSTT(t *testing.T) {
-	u := newUI()
-	operator := u.selectedOperator()
-	u.lookupCache[operator.Key] = model.LookupResult{
-		Operator: operator,
-		Entries: []model.PrefixEntry{
-			{Prefix: "198.51.100.0/24", ScanHosts: 254},
-		},
-	}
-	u.scanCache[operator.Key] = model.ScanResult{
-		Operator:        operator,
-		ScannedTargets:  10,
-		FinishedAt:      time.Now(),
-		DNSTTChecked:    1,
-		DNSTTFinishedAt: time.Now(),
+		ReachableCount: 2,
+		RecursiveCount: 2,
 		Resolvers: []model.Resolver{
-			{IP: "198.51.100.10", DNSReachable: true, RecursionAvailable: true, Stable: true, DNSTTTunnelOK: true},
-		},
-	}
-
-	u.mode = screenDNSTT
-	u.rebuildForm()
-
-	if !u.hasButton("Export Passed") {
-		t.Fatal("expected DNSTT screen to show Export Passed after DNSTT completes")
-	}
-	if !u.hasButton("Copy Passed") {
-		t.Fatal("expected DNSTT screen to show Copy Passed after DNSTT completes")
-	}
-	if !u.hasButton("Start DNSTT") {
-		t.Fatal("expected DNSTT screen to keep Start DNSTT visible")
-	}
-}
-
-func TestDNSTTScreenKeepsCommandRowCountStableAcrossCompletion(t *testing.T) {
-	u := newUI()
-	operator := u.selectedOperator()
-	u.lookupCache[operator.Key] = model.LookupResult{
-		Operator: operator,
-		Entries: []model.PrefixEntry{
-			{Prefix: "198.51.100.0/24", ScanHosts: 254},
-		},
-	}
-	u.scanCache[operator.Key] = model.ScanResult{
-		Operator:       operator,
-		ScannedTargets: 10,
-		FinishedAt:     time.Now(),
-		Resolvers: []model.Resolver{
-			{IP: "198.51.100.10", DNSReachable: true, TunnelScore: 6},
-		},
-	}
-
-	u.mode = screenDNSTT
-	u.rebuildForm()
-
-	if got := u.commands.GetItemCount(); got != 4 {
-		t.Fatalf("expected DNSTT command layout to reserve 4 items before completion, got %d", got)
-	}
-	if u.buttonRows[1].GetButtonCount() != 0 {
-		t.Fatalf("expected export action row to stay empty before completion, got %d button(s)", u.buttonRows[1].GetButtonCount())
-	}
-
-	result := u.scanCache[operator.Key]
-	result.DNSTTChecked = 1
-	result.DNSTTFinishedAt = time.Now()
-	result.Resolvers[0].DNSTTTunnelOK = true
-	u.scanCache[operator.Key] = result
-
-	u.rebuildForm()
-
-	if got := u.commands.GetItemCount(); got != 4 {
-		t.Fatalf("expected DNSTT command layout to stay at 4 items after completion, got %d", got)
-	}
-	if !u.hasButton("Export Passed") || !u.hasButton("Copy Passed") {
-		t.Fatal("expected DNSTT export actions after completion")
-	}
-}
-
-func TestCopyPassedResolversCopiesOnlyDNSTTPassedIPs(t *testing.T) {
-	u := newUI()
-	operator := u.selectedOperator()
-	u.scanCache[operator.Key] = model.ScanResult{
-		Operator:          operator,
-		FinishedAt:        time.Now(),
-		DNSTTChecked:      2,
-		DNSTTFinishedAt:   time.Now(),
-		DNSTTE2ERequested: true,
-		DNSTTE2EEnabled:   true,
-		ReachableCount:    2,
-		RecursiveCount:    2,
-		Resolvers: []model.Resolver{
-			{IP: "198.51.100.10", DNSReachable: true, RecursionAvailable: true, Stable: true, DNSTTE2EOK: true},
-			{IP: "198.51.100.11", DNSReachable: true, RecursionAvailable: true, Stable: true, DNSTTE2EOK: false},
+			{IP: "198.51.100.10", DNSReachable: true, RecursionAvailable: true, Stable: true, StormDNSChecked: true, StormDNSPassed: true},
+			{IP: "198.51.100.11", DNSReachable: true, RecursionAvailable: true, Stable: true, StormDNSChecked: true, StormDNSPassed: false},
 		},
 	}
 
@@ -1459,59 +1023,6 @@ func TestCopyPassedResolversCopiesOnlyDNSTTPassedIPs(t *testing.T) {
 	}
 	if !strings.Contains(u.lastStatusLine, "Copied 1 passed resolvers") {
 		t.Fatalf("unexpected status after copy: %q", u.lastStatusLine)
-	}
-}
-
-func TestSaveResolversOnDNSTTScreenWritesPassedAndFailureFiles(t *testing.T) {
-	u := newUI()
-	operator := u.selectedOperator()
-	tempDir := t.TempDir()
-	successPath := filepath.Join(tempDir, "passed.txt")
-
-	u.mode = screenDNSTT
-	u.scanFormat = export.FormatTXT.String()
-	u.scanPath = successPath
-	u.scanSuggestedPath = filepath.Join(tempDir, "suggested.txt")
-	u.scanCache[operator.Key] = model.ScanResult{
-		Operator:          operator,
-		ScoreThreshold:    2,
-		DNSTTChecked:      2,
-		DNSTTFinishedAt:   time.Date(2026, time.March, 23, 11, 7, 49, 0, time.UTC),
-		DNSTTE2ERequested: true,
-		DNSTTE2EEnabled:   true,
-		Resolvers: []model.Resolver{
-			{IP: "198.51.100.10", Prefix: "198.51.100.0/24", TunnelScore: 6, DNSTTChecked: true, DNSTTE2EOK: true, DNSTTTunnelOK: true},
-			{IP: "198.51.100.11", Prefix: "198.51.100.0/24", TunnelScore: 6, DNSTTChecked: true, DNSTTE2EOK: false, DNSTTTunnelOK: true, DNSTTError: "timeout"},
-		},
-	}
-
-	u.saveResolvers()
-
-	successData, err := os.ReadFile(successPath)
-	if err != nil {
-		t.Fatalf("expected passed export file: %v", err)
-	}
-	if got := string(successData); got != "198.51.100.10\n" {
-		t.Fatalf("unexpected passed export contents: %q", got)
-	}
-
-	failureMatches, err := filepath.Glob(filepath.Join(tempDir, "dnstt-scan-failures-"+operator.Key+"_*.txt"))
-	if err != nil {
-		t.Fatalf("failure export glob failed: %v", err)
-	}
-	if len(failureMatches) != 1 {
-		t.Fatalf("expected exactly one failure export file, got %v", failureMatches)
-	}
-
-	failureData, err := os.ReadFile(failureMatches[0])
-	if err != nil {
-		t.Fatalf("expected failure export file: %v", err)
-	}
-	if got := string(failureData); got != "198.51.100.11\n" {
-		t.Fatalf("unexpected failure export contents: %q", got)
-	}
-	if !strings.Contains(u.lastStatusLine, "failures to") {
-		t.Fatalf("expected status to mention failure export, got %q", u.lastStatusLine)
 	}
 }
 
@@ -1699,58 +1210,6 @@ func TestScannerDetailsShowWorkflowStages(t *testing.T) {
 	}
 	if !strings.Contains(text, "[################] 100.0%") {
 		t.Fatalf("expected completed workflow progress bar, got: %s", text)
-	}
-}
-
-func TestDNSTTDetailsShowDedicatedSections(t *testing.T) {
-	u := newUI()
-	operator := u.selectedOperator()
-	u.lookupCache[operator.Key] = model.LookupResult{
-		Operator:    operator,
-		SourceLabel: string(targetSourcePaste),
-		Entries: []model.PrefixEntry{
-			{Prefix: "198.51.100.0/24", TotalAddresses: 256, ScanHosts: 254},
-		},
-	}
-	u.scanCache[operator.Key] = model.ScanResult{
-		Operator:        operator,
-		FinishedAt:      time.Now(),
-		ScannedTargets:  254,
-		TotalTargets:    254,
-		ReachableCount:  12,
-		RecursiveCount:  5,
-		DNSTTChecked:    3,
-		DNSTTTunnel:     2,
-		DNSTTE2E:        1,
-		DNSTTFinishedAt: time.Now(),
-		Protocol:        string(scanner.ProtocolUDP),
-		Port:            53,
-		Workers:         256,
-		TimeoutMillis:   1200,
-		Resolvers: []model.Resolver{
-			{IP: "198.51.100.10", Prefix: "198.51.100.0/24", DNSReachable: true, RecursionAvailable: true, Stable: true, DNSTTTunnelOK: true},
-		},
-	}
-	u.mode = screenDNSTT
-	u.ensureScanRangeSelection(operator.Key)
-
-	u.renderDetails()
-
-	text := u.details.GetText(true)
-	if !strings.Contains(text, "Step Progress") || !strings.Contains(text, "3. StormDNS") {
-		t.Fatalf("expected staged workflow in details, got: %s", text)
-	}
-	if !strings.Contains(text, "DNSTT Guide") {
-		t.Fatalf("expected DNSTT guide in details, got: %s", text)
-	}
-	if !strings.Contains(text, "DNSTT Domain: Domain used for the tunnel") {
-		t.Fatalf("expected DNSTT guide entries in details, got: %s", text)
-	}
-	if strings.Index(text, "Step Progress") > strings.Index(text, "DNSTT Guide") {
-		t.Fatalf("expected DNSTT guide below step progress, got: %s", text)
-	}
-	if !strings.Contains(text, "DNSTT Setup\n") || !strings.Contains(text, "DNSTT Results\n") || !strings.Contains(text, "Export\n") {
-		t.Fatalf("expected dedicated DNSTT detail sections, got: %s", text)
 	}
 }
 
