@@ -175,6 +175,9 @@ dispatch:
 	r.TestedCount = tested.Load()
 	r.FinishedAt = time.Now()
 
+	if ctx.Err() != nil {
+		return r, ctx.Err()
+	}
 	if consecutiveKeyMismatch.Load() >= keyMismatchAbortThreshold {
 		return r, ErrKeyMismatchAbort
 	}

@@ -95,6 +95,39 @@ func TestVerifyAbortsOnFiveKeyMismatches(t *testing.T) {
 	}
 }
 
+func TestVerifyHonorsParentContextCancel(t *testing.T) {
+	resolvers := []model.Resolver{
+		{IP: "1.0.0.1", TunnelScore: 6},
+		{IP: "2.0.0.2", TunnelScore: 6},
+	}
+	// Stub prober that blocks until ctx done — guarantees we cancel mid-run.
+	stub := blockingProber{}
+	cfg := Config{
+		Domain:         "t.example.com",
+		Key:            "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+		ScoreThreshold: 2,
+		Workers:        1,
+		Timeout:        5 * time.Second,
+		Prober:         stub,
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() {
+		time.Sleep(50 * time.Millisecond)
+		cancel()
+	}()
+	_, err := Verify(ctx, resolvers, cfg, nil)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("expected context.Canceled, got %v", err)
+	}
+}
+
+type blockingProber struct{}
+
+func (blockingProber) ProbeMTU(ctx context.Context, opts stormdnsembed.ProbeOptions) stormdnsembed.ProbeResult {
+	<-ctx.Done()
+	return stormdnsembed.ProbeResult{Passed: false, Err: ctx.Err()}
+}
+
 func TestVerifyValidatesConfig(t *testing.T) {
 	cases := []struct {
 		name string
