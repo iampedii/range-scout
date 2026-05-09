@@ -39,6 +39,6 @@ require (
 
 replace www.bamsoftware.com/git/dnstt.git => ./third_party/dnstt
 
-require range-scout/third_party/stormdns v0.0.0-local
+require range-scout/third_party/stormdns v0.0.0-local // indirect
 
 replace range-scout/third_party/stormdns => ./third_party/stormdns
