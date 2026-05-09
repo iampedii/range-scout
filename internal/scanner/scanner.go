@@ -133,7 +133,7 @@ func Scan(
 
 	domain := configuredTunnelDomain(cfg.Domain)
 	if domain == "." {
-		return model.ScanResult{}, fmt.Errorf("dnstt domain is required")
+		return model.ScanResult{}, fmt.Errorf("StormDNS domain is required")
 	}
 	threshold := normalizeScoreThreshold(cfg.ScoreThreshold)
 	port := cfg.Port
