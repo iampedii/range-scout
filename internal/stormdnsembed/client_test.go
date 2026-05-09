@@ -62,4 +62,7 @@ func TestProbeMTUTimesOutOnUnreachable(t *testing.T) {
 	if res.Err == nil {
 		t.Fatalf("expected non-nil Err")
 	}
+	if !errors.Is(res.Err, ErrProbeTimeout) {
+		t.Fatalf("expected ErrProbeTimeout, got %v", res.Err)
+	}
 }

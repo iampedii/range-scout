@@ -137,8 +137,10 @@ func ProbeMTU(ctx context.Context, opts ProbeOptions) ProbeResult {
 	}
 }
 
-// classifyErr maps raw errors returned by the StormDNS internals to
-// range-scout's sentinel errors where possible.
+// classifyErr maps low-level errors from the vendored client to typed
+// sentinels in this package. Upstream returns untyped errors from its
+// codec/DNS parser paths, so string-matching is the only classification
+// path available — errors.Is/As don't work on those.
 func classifyErr(err error) error {
 	if err == nil {
 		return nil

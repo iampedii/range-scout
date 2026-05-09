@@ -17,6 +17,7 @@ import (
 	"errors"
 	"fmt"
 	"sync"
+	"sync/atomic"
 
 	"range-scout/third_party/stormdns/internal/config"
 	"range-scout/third_party/stormdns/internal/logger"
@@ -31,6 +32,8 @@ type ProbeOnlyClient struct {
 	conn    Connection
 	mu      sync.Mutex
 	lastErr error
+	upMTU   atomic.Int64
+	downMTU atomic.Int64
 }
 
 // NewProbeOnlyClient constructs a ProbeOnlyClient for the given resolver and
@@ -98,11 +101,6 @@ func NewProbeOnlyClient(
 		},
 		ResolverMap: map[string]int{resolverIP: resolverPort},
 	}
-	// Set active MTU trio directly (normally done by ApplyStartupModeMTU).
-	cfg.MTUTestRetries = retries
-	cfg.MTUTestTimeout = 2.0
-	cfg.MTUTestParallelism = 1
-
 	log := logger.New("StormDNS-Probe", "ERROR")
 
 	codec, err := security.NewCodec(encryptionMethod, key)
@@ -158,6 +156,9 @@ func (p *ProbeOnlyClient) ProbeOnce(ctx context.Context) bool {
 	p.conn.UploadMTUChars = result.UploadChars
 	p.conn.DownloadMTUBytes = result.DownloadBytes
 	p.conn.MTUResolveTime = result.ResolveTime
+	// Publish negotiated values atomically so NegotiatedMTU is race-free.
+	p.upMTU.Store(int64(result.UploadBytes))
+	p.downMTU.Store(int64(result.DownloadBytes))
 	p.setLastErr(nil)
 	return true
 }
@@ -174,12 +175,12 @@ func (p *ProbeOnlyClient) setLastErr(err error) {
 
 // NegotiatedMTU returns the upload and download MTU values discovered by the
 // most recent successful ProbeOnce call.  Both values are 0 until a probe
-// succeeds.
+// succeeds.  It is safe to call concurrently with ProbeOnce.
 func (p *ProbeOnlyClient) NegotiatedMTU() (up, down int) {
 	if p == nil {
 		return 0, 0
 	}
-	return p.conn.UploadMTUBytes, p.conn.DownloadMTUBytes
+	return int(p.upMTU.Load()), int(p.downMTU.Load())
 }
 
 // LastProbeError returns the last error from ProbeOnce, or nil if the most
