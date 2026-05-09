@@ -5,6 +5,35 @@ import (
 	"testing"
 )
 
+func TestPrefixIsFullyBogon(t *testing.T) {
+	cases := []struct {
+		name   string
+		prefix string
+		expect bool
+	}{
+		{"exact-rfc1918-10", "10.0.0.0/8", true},
+		{"sub-prefix-rfc1918", "10.5.0.0/16", true},
+		{"micro-sub-prefix", "10.0.0.0/30", true},
+		{"exact-rfc1918-172", "172.16.0.0/12", true},
+		{"exact-cgnat", "100.64.0.0/10", true},
+		{"sub-cgnat", "100.100.0.0/16", true},
+		{"public-supernet-spans-bogon", "172.0.0.0/8", false},
+		{"public-supernet-of-public", "8.8.8.0/24", false},
+		{"public", "1.1.1.0/24", false},
+		{"slash-zero-not-fully-bogon", "0.0.0.0/0", false},
+		{"loopback-host", "127.0.0.1/32", true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			p := netip.MustParsePrefix(tc.prefix)
+			got := PrefixIsFullyBogon(p)
+			if got != tc.expect {
+				t.Fatalf("PrefixIsFullyBogon(%s) = %v, want %v", tc.prefix, got, tc.expect)
+			}
+		})
+	}
+}
+
 func TestIsBogon(t *testing.T) {
 	cases := []struct {
 		name   string
