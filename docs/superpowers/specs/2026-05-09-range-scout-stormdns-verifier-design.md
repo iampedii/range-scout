@@ -174,11 +174,14 @@ Per resolver, calls `stormdnsembed.ProbeMTU` and writes results back into `model
 
 ### `internal/model/model.go` (MODIFIED)
 
-`Resolver` struct:
+`Resolver` struct (current DNSTT fields are `DNSTTNearby`, `DNSTTChecked`, `DNSTTTunnelOK`, `DNSTTE2EOK`, `DNSTTTunnelMillis`, `DNSTTE2EMillis`, `DNSTTError`):
 
-- Drop: `DNSTTPubkey`, `E2EURL`, `E2EStatus`, `SOCKSAuth`.
-- Add: `UpMTUBytes int`, `DownMTUBytes int`, `StormDNSPassed bool`, `StormDNSLatencyMS int64`.
-- Rename: `DNSTTPassed` → `StormDNSPassed`, `DNSTTLatencyMS` → `StormDNSLatencyMS`.
+- Rename: `DNSTTNearby` → `StormDNSNearby`, `DNSTTChecked` → `StormDNSChecked`, `DNSTTError` → `StormDNSError`.
+- Collapse: `DNSTTTunnelOK` + `DNSTTE2EOK` → single `StormDNSPassed bool` (StormDNS verifier has one outcome, not two stages).
+- Collapse: `DNSTTTunnelMillis` + `DNSTTE2EMillis` → single `StormDNSLatencyMS int64`.
+- Add: `UpMTUBytes int`, `DownMTUBytes int` for negotiated MTU values.
+
+(There is no `DNSTTPubkey`/`E2EURL`/`E2EStatus`/`SOCKSAuth` on `Resolver` — those live in `config.go`'s config struct and are dropped there, not here.)
 
 ### `internal/export/export.go` (MODIFIED)
 
