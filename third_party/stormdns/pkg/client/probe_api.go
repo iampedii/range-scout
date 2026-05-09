@@ -14,7 +14,9 @@ package client
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"sync"
 
 	"range-scout/third_party/stormdns/internal/config"
 	"range-scout/third_party/stormdns/internal/logger"
@@ -25,8 +27,10 @@ import (
 // one-shot MTU probe.  No balancer goroutines, no SOCKS5 listener, no health
 // loop, and no session are ever started.
 type ProbeOnlyClient struct {
-	c    *Client
-	conn Connection
+	c       *Client
+	conn    Connection
+	mu      sync.Mutex
+	lastErr error
 }
 
 // NewProbeOnlyClient constructs a ProbeOnlyClient for the given resolver and
@@ -127,6 +131,7 @@ func NewProbeOnlyClient(
 // On success the connection's UploadMTUBytes / DownloadMTUBytes are populated.
 func (p *ProbeOnlyClient) ProbeOnce(ctx context.Context) bool {
 	if p == nil || p.c == nil {
+		p.setLastErr(errors.New("probe failed: nil client"))
 		return false
 	}
 	// Determine max upload payload cap for this domain.
@@ -137,6 +142,14 @@ func (p *ProbeOnlyClient) ProbeOnce(ctx context.Context) bool {
 	conn := p.conn
 	result, reason := p.c.probeConnectionMTU(ctx, &conn, maxUpload)
 	if reason != mtuRejectNone {
+		// Capture the failure reason in lastErr
+		var err error
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			err = ctxErr
+		} else {
+			err = fmt.Errorf("probe failed: rejection reason %d", reason)
+		}
+		p.setLastErr(err)
 		return false
 	}
 	// Store results back so NegotiatedMTU can read them.
@@ -145,7 +158,18 @@ func (p *ProbeOnlyClient) ProbeOnce(ctx context.Context) bool {
 	p.conn.UploadMTUChars = result.UploadChars
 	p.conn.DownloadMTUBytes = result.DownloadBytes
 	p.conn.MTUResolveTime = result.ResolveTime
+	p.setLastErr(nil)
 	return true
+}
+
+// setLastErr stores the error under the mutex lock.
+func (p *ProbeOnlyClient) setLastErr(err error) {
+	if p == nil {
+		return
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.lastErr = err
 }
 
 // NegotiatedMTU returns the upload and download MTU values discovered by the
@@ -156,6 +180,17 @@ func (p *ProbeOnlyClient) NegotiatedMTU() (up, down int) {
 		return 0, 0
 	}
 	return p.conn.UploadMTUBytes, p.conn.DownloadMTUBytes
+}
+
+// LastProbeError returns the last error from ProbeOnce, or nil if the most
+// recent probe succeeded.
+func (p *ProbeOnlyClient) LastProbeError() error {
+	if p == nil {
+		return nil
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.lastErr
 }
 
 // Close is a no-op for ProbeOnlyClient (no goroutines or connections are held
